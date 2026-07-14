@@ -1,0 +1,154 @@
+version: '3'
+
+silent: true
+
+vars:
+  BINARY: goworktree
+
+tasks:
+  default:
+    desc: Quickstart — build and show next steps
+    cmds:
+      - task: build
+      - task: check-deps
+      - |
+        echo ""
+        echo "Quickstart:"
+        echo "  ./{{.BINARY}}             interactive home menu"
+        echo "  task init              interactive setup"
+        echo "  task start -- my-proj  create / resume project"
+        echo "  task add / task drop   change repos in a project"
+        echo "  task list              list projects"
+        echo "  task doctor            check deps"
+        echo "  task install           install to \$GOPATH/bin"
+        echo ""
+        echo "Run CLI directly:"
+        echo "  ./{{.BINARY}} help"
+
+  build:
+    desc: Build binary to ./{{.BINARY}}
+    sources:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BINARY}}'
+    cmds:
+      - go build -o {{.BINARY}} .
+
+  install:
+    desc: Install to $GOPATH/bin
+    deps: [build]
+    cmds:
+      - go install .
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}}
+
+  check-deps:
+    desc: Check external dependencies (git, cursor)
+    cmds:
+      - |
+        command -v git >/dev/null || { echo "missing: git"; exit 1; }
+        echo "ok: git"
+        if command -v cursor >/dev/null; then
+          echo "ok: cursor"
+        elif [ -x /Applications/Cursor.app/Contents/MacOS/Cursor ]; then
+          echo "ok: Cursor.app"
+        else
+          echo "optional: cursor not found"
+        fi
+
+  init:
+    desc: Interactive first-time setup
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} init
+
+  start:
+    desc: Create worktree project (pass name via CLI_ARGS)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} start {{.CLI_ARGS}}
+
+  add:
+    desc: Add repositories to an existing project
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} add {{.CLI_ARGS}}
+
+  drop:
+    desc: Drop repositories from a project (-D deletes local branches)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} drop {{.CLI_ARGS}}
+
+  list:
+    desc: List worktree projects
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} list
+
+  remove:
+    desc: Remove a worktree project group (picker if no name)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} remove {{.CLI_ARGS}}
+
+  doctor:
+    desc: Check git, editors, and config
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} doctor
+
+  cursor:
+    desc: Open project in Cursor (picker if no name)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} cursor {{.CLI_ARGS}}
+
+  goland:
+    desc: Open project in GoLand (picker if no name)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} goland {{.CLI_ARGS}}
+
+  config:
+    desc: Show configuration
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} config show
+
+  repos:scan:
+    desc: Rescan repositories root
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repos scan
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./...
+
+  tidy:
+    desc: Tidy go modules
+    cmds:
+      - go mod tidy
+
+  dev:
+    desc: Build and run with arbitrary args (task dev -- help)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} {{.CLI_ARGS}}
