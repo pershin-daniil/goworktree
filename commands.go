@@ -17,6 +17,43 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/tui"
 )
 
+func csvFlag(args []string, name string) []string {
+	v := flagValue(args, name)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func isFlagWithValue(args []string, index int, name string) bool {
+	return args[index] == name || strings.HasPrefix(args[index], name+"=")
+}
+
+// runCreateTasks is the command-mode equivalent of the interactive progress
+// screen. It keeps resumable manifest state while writing normal CLI output.
+func runCreateTasks(projectDir string, m *project.Manifest, tasks []tui.CreateTask) error {
+	for _, task := range tasks {
+		fmt.Printf("  creating %s\n", task.Folder)
+		if err := git.AddProjectWorktree(task.RepoPath, task.Dest, task.Branch, task.BaseBranch); err != nil {
+			m.SetStatus(task.ID, project.StatusFailed, err.Error())
+			_ = m.Save(projectDir)
+			return fmt.Errorf("%s: %w", task.Folder, err)
+		}
+		m.SetStatus(task.ID, project.StatusReady, "")
+		if err := m.Save(projectDir); err != nil {
+			return fmt.Errorf("save manifest: %w", err)
+		}
+	}
+	return nil
+}
+
 func runInit() error {
 	return tui.RunInit()
 }
@@ -29,9 +66,16 @@ func runStart(args []string) error {
 
 	openCursor := false
 	var positional []string
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if arg == "--open" {
 			openCursor = true
+			continue
+		}
+		if isFlagWithValue(args, i, "--repos") {
+			if arg == "--repos" {
+				i++
+			}
 			continue
 		}
 		positional = append(positional, arg)
@@ -40,21 +84,22 @@ func runStart(args []string) error {
 	name := ""
 	if len(positional) > 0 {
 		name = positional[0]
-	} else {
-		name, err = tui.AskProjectName()
-		if err != nil {
-			return err
-		}
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return fmt.Errorf("project name is required")
+		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
 	}
 
 	projectDir := filepath.Join(cfg.ProjectsRoot, name)
 
 	// Resume path: existing incomplete manifest.
 	if m, err := project.LoadManifest(projectDir); err == nil {
+		if removed := m.DeduplicateRepos(); removed > 0 {
+			if err := m.Save(projectDir); err != nil {
+				return fmt.Errorf("repair duplicate repositories in manifest: %w", err)
+			}
+			fmt.Printf("repaired %q: removed %d duplicate repository entry(s)\n", name, removed)
+		}
 		pending := m.NeedsWork()
 		if len(pending) == 0 {
 			fmt.Printf("project %q already complete: %s\n", name, projectDir)
@@ -65,7 +110,7 @@ func runStart(args []string) error {
 		}
 		fmt.Printf("resuming %q (%d pending)\n", name, len(pending))
 		tasks := tui.TasksFromManifest(projectDir, m, true)
-		if err := tui.RunCreate(projectDir, m, tasks, true); err != nil {
+		if err := runCreateTasks(projectDir, m, tasks); err != nil {
 			return err
 		}
 		if openCursor {
@@ -75,25 +120,13 @@ func runStart(args []string) error {
 		return nil
 	}
 
-	ids := cfg.RepoNames()
-	sort.Strings(ids)
-	if len(ids) == 0 {
+	if len(cfg.RepoNames()) == 0 {
 		return fmt.Errorf("no repositories — run `goworktree repos scan`")
 	}
 
-	items := make([]tui.Item, 0, len(ids))
-	for _, id := range ids {
-		base := cfg.RepoBranch(id)
-		items = append(items, tui.Item{
-			ID:    id,
-			Title: cfg.DisplayName(id),
-			Desc:  fmt.Sprintf("%s → %s", base, name),
-		})
-	}
-
-	selected, err := tui.PickMulti("Select repositories", items)
-	if err != nil {
-		return err
+	selected := csvFlag(args, "--repos")
+	if len(selected) == 0 {
+		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
 	}
 
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -131,7 +164,7 @@ func runStart(args []string) error {
 	}
 
 	tasks := tui.TasksFromManifest(projectDir, m, true)
-	if err := tui.RunCreate(projectDir, m, tasks, true); err != nil {
+	if err := runCreateTasks(projectDir, m, tasks); err != nil {
 		return err
 	}
 
@@ -190,6 +223,12 @@ func requireManifest(cfg *config.Config, name string) (projectDir string, m *pro
 	if !hadManifest {
 		fmt.Printf("migrated manifest for %q (%d repos)\n", name, len(m.Repos))
 	}
+	if removed := m.DeduplicateRepos(); removed > 0 {
+		if err := m.Save(projectDir); err != nil {
+			return "", nil, fmt.Errorf("repair duplicate repositories in manifest: %w", err)
+		}
+		fmt.Printf("repaired %q: removed %d duplicate repository entry(s)\n", name, removed)
+	}
 	return projectDir, m, nil
 }
 
@@ -200,21 +239,24 @@ func runAdd(args []string) error {
 	}
 
 	name := ""
-	if len(args) > 0 {
-		name = args[0]
+	for i := 0; i < len(args); i++ {
+		if isFlagWithValue(args, i, "--repos") {
+			if args[i] == "--repos" {
+				i++
+			}
+			continue
+		}
+		name = args[i]
+		break
 	}
 	if name == "" {
-		name, err = pickProject(cfg, "Add to project")
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
 	}
 
 	projectDir, m, err := requireManifest(cfg, name)
 	if err != nil {
 		return err
 	}
-
 	inProject := map[string]struct{}{}
 	for _, id := range m.IDs() {
 		inProject[id] = struct{}{}
@@ -225,6 +267,9 @@ func runAdd(args []string) error {
 		if _, ok := inProject[id]; ok {
 			continue
 		}
+		if repoPath, ok := cfg.RepoPath(id); ok && m.ContainsPath(repoPath) {
+			continue
+		}
 		candidates = append(candidates, id)
 	}
 	sort.Strings(candidates)
@@ -232,19 +277,18 @@ func runAdd(args []string) error {
 		return fmt.Errorf("no more repositories to add — all configured repos are already in the project")
 	}
 
-	items := make([]tui.Item, 0, len(candidates))
-	for _, id := range candidates {
-		base := cfg.RepoBranch(id)
-		items = append(items, tui.Item{
-			ID:    id,
-			Title: cfg.DisplayName(id),
-			Desc:  fmt.Sprintf("%s → %s", base, m.Name),
-		})
+	selected := csvFlag(args, "--repos")
+	if len(selected) == 0 {
+		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
 	}
-
-	selected, err := tui.PickMulti("Select repositories to add", items)
-	if err != nil {
-		return err
+	allowed := make(map[string]bool, len(candidates))
+	for _, id := range candidates {
+		allowed[id] = true
+	}
+	for _, id := range selected {
+		if !allowed[id] {
+			return fmt.Errorf("repository %q cannot be added to project %q", id, name)
+		}
 	}
 
 	folderPool := append(m.IDs(), selected...)
@@ -281,7 +325,7 @@ func runAdd(args []string) error {
 	}
 
 	tasks := tui.TasksFromManifest(projectDir, m, true)
-	if err := tui.RunCreate(projectDir, m, tasks, false); err != nil {
+	if err := runCreateTasks(projectDir, m, tasks); err != nil {
 		return err
 	}
 
@@ -296,12 +340,22 @@ func runDrop(args []string) error {
 	}
 
 	deleteBranches := false
+	assumeYes := false
 	var positional []string
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "--delete-branches", "-D":
 			deleteBranches = true
+		case "--yes":
+			assumeYes = true
 		default:
+			if isFlagWithValue(args, i, "--repos") {
+				if arg == "--repos" {
+					i++
+				}
+				continue
+			}
 			positional = append(positional, arg)
 		}
 	}
@@ -311,10 +365,7 @@ func runDrop(args []string) error {
 		name = positional[0]
 	}
 	if name == "" {
-		name, err = pickProject(cfg, "Drop from project")
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
 	}
 
 	projectDir, m, err := requireManifest(cfg, name)
@@ -325,22 +376,9 @@ func runDrop(args []string) error {
 		return fmt.Errorf("project %q has no repositories", name)
 	}
 
-	items := make([]tui.Item, 0, len(m.Repos))
-	for _, r := range m.Repos {
-		folder := r.Folder
-		if folder == "" {
-			folder = r.ID
-		}
-		items = append(items, tui.Item{
-			ID:    r.ID,
-			Title: folder,
-			Desc:  r.Branch,
-		})
-	}
-
-	selected, err := tui.PickMulti("Select repositories to drop", items)
-	if err != nil {
-		return err
+	selected := csvFlag(args, "--repos")
+	if len(selected) == 0 {
+		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
 	}
 
 	msg := fmt.Sprintf("Drop %d repo(s) from project %q?\n\nProject folder stays; other worktrees are untouched.",
@@ -348,12 +386,8 @@ func runDrop(args []string) error {
 	if deleteBranches {
 		msg += "\n\nAlso deletes LOCAL project branches (-D). Remote branches are not touched."
 	}
-	ok, err := tui.Confirm(msg)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return tui.ErrCancelled
+	if !assumeYes {
+		return fmt.Errorf("refusing destructive operation without --yes: %s", strings.ReplaceAll(msg, "\n", " "))
 	}
 
 	for _, id := range selected {
@@ -397,6 +431,143 @@ func runDrop(args []string) error {
 	return nil
 }
 
+func runSync(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if name == "" {
+		return fmt.Errorf("usage: goworktree sync <project>")
+	}
+
+	projectDir, m, err := requireManifest(cfg, name)
+	if err != nil {
+		return err
+	}
+	if len(m.Repos) == 0 {
+		return fmt.Errorf("project %q has no repositories", name)
+	}
+
+	counts := map[git.SyncStatus]int{}
+	failed := false
+	fmt.Printf("syncing %q\n", name)
+	for _, r := range m.Repos {
+		folder := r.Folder
+		if folder == "" {
+			folder = r.ID
+		}
+		wtPath := filepath.Join(projectDir, folder)
+		result := git.SyncWorktree(wtPath, r.Branch, r.Base)
+		counts[result.Status]++
+		switch result.Status {
+		case git.SyncRebased:
+			fmt.Printf("  rebased      %s\n", folder)
+		case git.SyncUpToDate:
+			fmt.Printf("  up-to-date   %s\n", folder)
+		case git.SyncRolledBack:
+			failed = true
+			fmt.Printf("  rolled-back  %s: %v\n", folder, result.Err)
+		default:
+			failed = true
+			fmt.Printf("  failed       %s: %v\n", folder, result.Err)
+		}
+	}
+
+	fmt.Printf("\nsummary: %d rebased, %d up-to-date, %d rolled back, %d failed\n",
+		counts[git.SyncRebased], counts[git.SyncUpToDate], counts[git.SyncRolledBack],
+		counts[git.SyncFailed])
+	if failed {
+		return fmt.Errorf("one or more repositories could not be synchronized")
+	}
+	return nil
+}
+
+// runBranch adopts the branch currently checked out in one project worktree.
+// The manifest remains explicit per repository while sync can keep rejecting an
+// accidental checkout instead of rebasing an unexpected branch.
+func runBranch(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if name == "" {
+		return fmt.Errorf("usage: goworktree branch <project> <repo>")
+	}
+
+	projectDir, m, err := requireManifest(cfg, name)
+	if err != nil {
+		return err
+	}
+	if len(m.Repos) == 0 {
+		return fmt.Errorf("project %q has no repositories", name)
+	}
+
+	repoID := ""
+	if len(args) > 1 {
+		repoID = args[1]
+	}
+	if repoID == "" {
+		return fmt.Errorf("usage: goworktree branch <project> <repo>")
+	}
+
+	index := -1
+	for i, r := range m.Repos {
+		folder := r.Folder
+		if folder == "" {
+			folder = r.ID
+		}
+		if r.ID == repoID || folder == repoID {
+			if index != -1 {
+				return fmt.Errorf("repository %q is ambiguous; use its manifest id", repoID)
+			}
+			index = i
+		}
+	}
+	if index == -1 {
+		return fmt.Errorf("repository %q is not in project %q", repoID, name)
+	}
+
+	r := m.Repos[index]
+	folder := r.Folder
+	if folder == "" {
+		folder = r.ID
+	}
+	branch, err := git.CurrentBranch(filepath.Join(projectDir, folder))
+	if err != nil {
+		return fmt.Errorf("%s: read current branch: %w", folder, err)
+	}
+	if branch == "HEAD" {
+		return fmt.Errorf("%s: detached HEAD cannot be adopted", folder)
+	}
+	old := r.Branch
+	if !m.SetBranch(r.ID, branch) {
+		return fmt.Errorf("repository %q disappeared from manifest", r.ID)
+	}
+	if err := m.Save(projectDir); err != nil {
+		return err
+	}
+	if old == branch {
+		fmt.Printf("%s already uses branch %q\n", folder, branch)
+		return nil
+	}
+	if old == "" {
+		fmt.Printf("%s: branch set to %q\n", folder, branch)
+		return nil
+	}
+	fmt.Printf("%s: branch %q → %q\n", folder, old, branch)
+	return nil
+}
+
 func runCursor(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -408,10 +579,7 @@ func runCursor(args []string) error {
 		name = args[0]
 	}
 	if name == "" {
-		name, err = pickProject(cfg, "Open in Cursor")
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("usage: goworktree cursor <project>")
 	}
 
 	dir, err := project.Dir(cfg, name)
@@ -432,10 +600,7 @@ func runGoland(args []string) error {
 		name = args[0]
 	}
 	if name == "" {
-		name, err = pickProject(cfg, "Open in GoLand")
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("usage: goworktree goland <project>")
 	}
 
 	dir, err := project.Dir(cfg, name)
@@ -469,11 +634,14 @@ func runRemove(args []string) error {
 	}
 
 	deleteBranches := false
+	assumeYes := false
 	var positional []string
 	for _, arg := range args {
 		switch arg {
 		case "--delete-branches", "-D":
 			deleteBranches = true
+		case "--yes":
+			assumeYes = true
 		default:
 			positional = append(positional, arg)
 		}
@@ -484,10 +652,7 @@ func runRemove(args []string) error {
 		name = positional[0]
 	}
 	if name == "" {
-		name, err = pickProject(cfg, "Remove project")
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("usage: goworktree remove <project> [-D] [--yes]")
 	}
 
 	entry, err := project.Find(cfg, name)
@@ -500,12 +665,8 @@ func runRemove(args []string) error {
 	if deleteBranches {
 		msg += "\n\nAlso deletes LOCAL project branches (-D). Remote branches are not touched."
 	}
-	ok, err := tui.Confirm(msg)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return tui.ErrCancelled
+	if !assumeYes {
+		return fmt.Errorf("refusing destructive operation without --yes: %s", strings.ReplaceAll(msg, "\n", " "))
 	}
 
 	for _, wt := range entry.Worktrees {

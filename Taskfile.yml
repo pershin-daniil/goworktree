@@ -14,10 +14,12 @@ tasks:
       - |
         echo ""
         echo "Quickstart:"
-        echo "  ./{{.BINARY}}             interactive home menu"
+        echo "  ./{{.BINARY}}             unified interactive dashboard"
         echo "  task init              interactive setup"
-        echo "  task start -- my-proj  create / resume project"
+        echo "  task start -- my-proj --repos api,web  create / resume project"
         echo "  task add / task drop   change repos in a project"
+        echo "  task sync -- my-proj   rebase project branches"
+        echo "  task branch -- my-proj repo  adopt current worktree branch"
         echo "  task list              list projects"
         echo "  task doctor            check deps"
         echo "  task install           install to \$GOPATH/bin"
@@ -84,6 +86,18 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY}} drop {{.CLI_ARGS}}
+
+  sync:
+    desc: Rebase project branches onto origin bases
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} sync {{.CLI_ARGS}}
+
+  branch:
+    desc: Adopt a repository worktree's current branch
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} branch {{.CLI_ARGS}}
 
   list:
     desc: List worktree projects

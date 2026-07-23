@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,17 @@ func (m *Manifest) SetStatus(id, status, errMsg string) {
 	}
 }
 
+// SetBranch updates the expected checked-out branch for one repository.
+func (m *Manifest) SetBranch(id, branch string) bool {
+	for i := range m.Repos {
+		if m.Repos[i].ID == id {
+			m.Repos[i].Branch = branch
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manifest) ReadyCount() int {
 	n := 0
 	for _, r := range m.Repos {
@@ -113,10 +125,63 @@ func (m *Manifest) IDs() []string {
 }
 
 func (m *Manifest) AddRepo(r ManifestRepo) {
-	if m.Contains(r.ID) {
+	if m.Contains(r.ID) || m.ContainsPath(r.Path) {
 		return
 	}
 	m.Repos = append(m.Repos, r)
+}
+
+// ContainsPath reports whether the manifest already contains the same primary
+// repository. Paths are made absolute and symlinks are resolved when possible
+// so legacy and current repository IDs cannot add the same Git repository twice.
+func (m *Manifest) ContainsPath(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	key := repoPathKey(path)
+	for _, r := range m.Repos {
+		if r.Path != "" && repoPathKey(r.Path) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// DeduplicateRepos removes duplicate physical repositories left by older
+// manifests. A ready entry wins over a pending or failed entry because it
+// describes the worktree that Git has already registered.
+func (m *Manifest) DeduplicateRepos() int {
+	seen := make(map[string]int, len(m.Repos))
+	out := make([]ManifestRepo, 0, len(m.Repos))
+	removed := 0
+	for _, r := range m.Repos {
+		key := repoPathKey(r.Path)
+		if r.Path == "" {
+			key = "id:" + r.ID
+		}
+		if index, ok := seen[key]; ok {
+			if out[index].Status != StatusReady && r.Status == StatusReady {
+				out[index] = r
+			}
+			removed++
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, r)
+	}
+	m.Repos = out
+	return removed
+}
+
+func repoPathKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	return filepath.Clean(abs)
 }
 
 func (m *Manifest) RemoveRepo(id string) (ManifestRepo, bool) {

@@ -2,6 +2,8 @@
 
 Personal CLI for **multi-repo git worktree project groups** — pick repos, create a shared branch worktree folder, open it in Cursor or GoLand.
 
+Running `goworktree` with no arguments opens one persistent dashboard: navigation, forms, confirmations, progress, and results stay inside the same terminal UI. A failed operation exposes `c` to copy a structured diagnostic report; it can include local paths and Git error text.
+
 **MVP status.** Stable enough for daily ticket work. Stack: stdlib CLI, JSON config, Bubble Tea (no external `fzf`).
 
 Repo: [github.com/pershin-daniil/goworktree](https://github.com/pershin-daniil/goworktree)
@@ -24,10 +26,11 @@ Requires: **Go 1.23+**, **git**, and optionally Cursor / GoLand.
 
 ```bash
 goworktree init                 # TUI: paths + scan repos_root
-goworktree                      # interactive home menu (vim keys)
-goworktree start EVOVPC-2855    # create / resume project group
+goworktree                      # unified interactive dashboard (vim keys)
+goworktree start EVOVPC-2855 --repos api,web # create / resume project group
 goworktree list
-goworktree cursor               # pick project → open in Cursor
+goworktree sync EVOVPC-2855     # rebase project branches onto origin bases
+goworktree cursor EVOVPC-2855   # open a project in Cursor
 ```
 
 With [Task](https://taskfile.dev):
@@ -48,19 +51,23 @@ task doctor
 3. **`start <name>`** — for each selected repo, creates branch `<name>` from that repo’s base branch into `projects_root/<name>/`. Base resolution: config → `origin/HEAD` → main/master/develop → HEAD.
 4. **Manifest** — `.goworktree.json` in the project folder. Re-run `start` to **resume** pending/failed repos.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
-6. **`remove -D`** — delete the whole group; `-D` deletes local project branches (never remotes).
+6. **`remove -D`** — fully delete a project group: its worktrees, local project branches, stale Git worktree registrations, and project folder. Remote branches are never touched.
+7. **`sync`** — fetch `origin` and rebase each project branch onto its configured base. Dirty files are auto-stashed and restored; a rebase or restore conflict rolls that repository back.
+8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| *(no args)* | Interactive home menu |
+| *(no args)* | Unified interactive dashboard |
 | `init` | First-time setup + repo scan |
-| `start [name] [--open]` | Create or resume a project |
-| `add [project]` | Add repos to a project |
-| `drop [project] [-D]` | Drop repos (`-D` = delete local branches) |
+| `start <name> --repos id,id [--open]` | Create or resume a project |
+| `add <project> --repos id,id` | Add repos to a project |
+| `drop <project> --repos id,id [-D] [--yes]` | Drop repos (`-D` = delete local branches) |
+| `sync <project>` | Fetch and rebase project branches onto their origin base branches |
+| `branch <project> <repo>` | Adopt a repository worktree's current branch in the project manifest |
 | `list` / `ls` | List project groups |
-| `remove` / `rm` `[name] [-D]` | Delete a project group |
+| `remove` / `rm` `<name> [-D] [--yes]` | Delete a project group |
 | `cursor` / `goland` / `open` | Open project in editor |
 | `doctor` | Check git, editors, config |
 | `config show` / `edit` / `set <key> <value>` | Configuration |
@@ -79,7 +86,7 @@ task doctor
 | `Esc` / `q` | cancel / quit |
 | `Ctrl+C` | hard quit |
 
-After `list`, `doctor`, or `config` from the home menu: **press Enter** to return to the menu.
+The dashboard never drops to a console-only screen or asks for a continuation pause. On failure, press `c` to copy the diagnostic report and `Enter`/`Esc` to return to the dashboard.
 
 ## Config sketch
 

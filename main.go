@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/pershin-daniil/goworktree/internal/tui"
 )
@@ -23,17 +24,7 @@ const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		exitOnError(tui.RunShell(tui.ShellActions{
-			Start:  func() error { return runStart(nil) },
-			Add:    func() error { return runAdd(nil) },
-			Drop:   func() error { return runDrop(nil) },
-			List:   runList,
-			Cursor: func() error { return runCursor(nil) },
-			Goland: func() error { return runGoland(nil) },
-			Remove: func() error { return runRemove(nil) },
-			Doctor: runDoctor,
-			Config: runConfigShow,
-		}))
+		exitOnError(tui.RunApp(tui.AppActions{Version: version, Execute: runAppCommand}))
 		return
 	}
 
@@ -47,6 +38,10 @@ func main() {
 		err = runAdd(os.Args[2:])
 	case "drop":
 		err = runDrop(os.Args[2:])
+	case "sync":
+		err = runSync(os.Args[2:])
+	case "branch":
+		err = runBranch(os.Args[2:])
 	case "list", "ls":
 		err = runList()
 	case "remove", "rm":
@@ -76,6 +71,19 @@ func main() {
 	}
 
 	exitOnError(err)
+}
+
+// runAppCommand executes an explicit CLI invocation while the root TUI owns
+// the terminal.  Capturing both streams prevents Git diagnostics from drawing
+// over Bubble Tea's alternate screen.
+func runAppCommand(args []string) (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(path, args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func runConfig(args []string) error {
@@ -134,22 +142,26 @@ func usage() {
 usage:
   goworktree                       interactive home menu
   goworktree init
-  goworktree start [name] [--open] create or resume project (branch = name)
-  goworktree add [project]         add repos to an existing project
-  goworktree drop [project] [-D]   remove repos from a project
+  goworktree start <name> --repos id,id [--open] create or resume project
+  goworktree add <project> --repos id,id add repos to an existing project
+  goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
+  goworktree sync <project>        rebase project branches onto origin bases
+  goworktree branch <project> <repo> adopt a worktree's current branch
   goworktree list
-  goworktree remove [project] [-D] delete whole project group
-  goworktree cursor [project]
-  goworktree goland [project]
+  goworktree remove <project> [-D] [--yes] delete whole project group
+  goworktree cursor <project>
+  goworktree goland <project>
   goworktree open [project]        alias for cursor
   goworktree doctor
   goworktree config [show|edit|set <key> <value>]
   goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
 
 notes:
-  pickers use vim keys (j/k, g/G, /, space, enter, esc)
+  without arguments, goworktree starts the unified interactive dashboard
+  explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
-  drop/remove -D deletes only LOCAL branches; remotes are untouched
+  remove -D fully clears project worktrees and LOCAL branches; remotes are untouched
+  drop -D deletes only LOCAL branches; remotes are untouched
   add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
 
 `, version)

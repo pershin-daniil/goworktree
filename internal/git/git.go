@@ -15,6 +15,22 @@ type ScannedRepo struct {
 	Alias string
 }
 
+type SyncStatus string
+
+const (
+	SyncRebased    SyncStatus = "rebased"
+	SyncUpToDate   SyncStatus = "up-to-date"
+	SyncRolledBack SyncStatus = "rolled-back"
+	SyncFailed     SyncStatus = "failed"
+)
+
+type SyncResult struct {
+	Status SyncStatus
+	From   string
+	To     string
+	Err    error
+}
+
 func IsRepo(path string) bool {
 	_, err := os.Stat(filepath.Join(path, ".git"))
 	return err == nil
@@ -190,6 +206,17 @@ func prune(gitDir string) error {
 	return exec.Command("git", "--git-dir="+gitDir, "worktree", "prune").Run()
 }
 
+// PruneWorktrees removes stale worktree registrations from a primary repository.
+// It is useful after a project folder was removed while one of its linked
+// worktrees was already broken on disk.
+func PruneWorktrees(repo string) error {
+	gitDir, err := CommonDir(repo)
+	if err != nil {
+		return err
+	}
+	return prune(gitDir)
+}
+
 func CommonDir(path string) (string, error) {
 	out, err := run(path, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -233,6 +260,156 @@ func DeleteBranch(gitDir, branch string) error {
 		return fmt.Errorf("git branch -D %s: %s", branch, msg)
 	}
 	return nil
+}
+
+// SyncWorktree fetches origin and rebases the checked-out project branch onto
+// origin/<base>. Local changes, including untracked files, are stashed and
+// restored around the operation. A failed rebase is aborted before returning.
+func SyncWorktree(repo, expectedBranch, base string) SyncResult {
+	result := SyncResult{Status: SyncFailed}
+	if strings.TrimSpace(base) == "" {
+		result.Err = fmt.Errorf("base branch is empty")
+		return result
+	}
+	branch, err := CurrentBranch(repo)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if branch == "HEAD" {
+		result.Err = fmt.Errorf("detached HEAD")
+		return result
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		result.Err = fmt.Errorf("current branch %q, expected %q", branch, expectedBranch)
+		return result
+	}
+
+	from, err := revision(repo, "HEAD")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	result.From = from
+
+	if _, err := run(repo, "fetch", "origin"); err != nil {
+		result.Err = err
+		return result
+	}
+	target := remoteBase(base)
+	to, err := revision(repo, target)
+	if err != nil {
+		result.Err = fmt.Errorf("base %s: %w", target, err)
+		return result
+	}
+	result.To = to
+
+	alreadyBased, err := isAncestor(repo, to, from)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if alreadyBased {
+		result.Status = SyncUpToDate
+		return result
+	}
+
+	dirty, err := isDirty(repo)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	stashed := false
+	if dirty {
+		if _, err := run(repo, "stash", "push", "--include-untracked", "--message", "goworktree sync auto-stash"); err != nil {
+			result.Err = err
+			return result
+		}
+		stashed = true
+	}
+
+	restore := func() error {
+		if !stashed {
+			return nil
+		}
+		if _, err := run(repo, "stash", "apply", "--index", "stash@{0}"); err != nil {
+			return err
+		}
+		_, err := run(repo, "stash", "drop", "stash@{0}")
+		return err
+	}
+
+	if _, err := run(repo, "rebase", target); err != nil {
+		_, _ = run(repo, "rebase", "--abort")
+		_, _ = run(repo, "reset", "--hard", from)
+		if restoreErr := restore(); restoreErr != nil {
+			result.Err = fmt.Errorf("rebase failed: %v; rollback auto-stash restore failed: %w (stash preserved)", err, restoreErr)
+			return result
+		}
+		result.Status = SyncRolledBack
+		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", target, shortRevision(from))
+		result.To = from
+		return result
+	}
+	if err := restore(); err == nil {
+		result.Status = SyncRebased
+		if head, headErr := revision(repo, "HEAD"); headErr == nil {
+			result.To = head
+		}
+		return result
+	}
+
+	// Applying the stash on the new commit conflicted. Remove only files created
+	// by that failed apply, return to the original commit, and restore the stash
+	// against the exact tree it came from.
+	_, _ = run(repo, "reset", "--hard", from)
+	_, _ = run(repo, "clean", "-fd")
+	if err := restore(); err != nil {
+		result.Err = fmt.Errorf("rollback to %s succeeded, but auto-stash restore failed: %w (stash preserved)", from, err)
+		return result
+	}
+	result.Status = SyncRolledBack
+	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", target, from)
+	result.To = from
+	return result
+}
+
+func shortRevision(revision string) string {
+	if len(revision) > 12 {
+		return revision[:12]
+	}
+	return revision
+}
+
+func remoteBase(base string) string {
+	base = strings.TrimSpace(base)
+	base = strings.TrimPrefix(base, "refs/heads/")
+	base = strings.TrimPrefix(base, "refs/remotes/origin/")
+	base = strings.TrimPrefix(base, "origin/")
+	return "origin/" + base
+}
+
+func revision(repo, ref string) (string, error) {
+	out, err := run(repo, "rev-parse", "--verify", ref+"^{commit}")
+	return strings.TrimSpace(out), err
+}
+
+func isDirty(repo string) (bool, error) {
+	out, err := run(repo, "status", "--porcelain", "--untracked-files=normal")
+	return strings.TrimSpace(out) != "", err
+}
+
+func isAncestor(repo, older, newer string) (bool, error) {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", older, newer)
+	cmd.Dir = repo
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
 // ScanRepos walks root up to maxDepth levels and returns primary clones only.
