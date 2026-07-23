@@ -76,7 +76,10 @@ func loadEntry(name, path string) Entry {
 			if folder == "" {
 				folder = r.ID
 			}
-			wtPath := filepath.Join(path, folder)
+			wtPath, pathErr := WorktreePath(path, folder)
+			if pathErr != nil {
+				continue
+			}
 			branch := r.Branch
 			if git.IsRepo(wtPath) {
 				if b, err := git.CurrentBranch(wtPath); err == nil {
@@ -119,6 +122,22 @@ func loadEntry(name, path string) Entry {
 
 // Remove deletes every worktree in the project group, then the project folder.
 func Remove(entry Entry, deleteBranches bool) error {
+	mark := func(wt Worktree, status, message string) {
+		if entry.Manifest == nil {
+			return
+		}
+		for _, r := range entry.Manifest.Repos {
+			folder := r.Folder
+			if folder == "" {
+				folder = r.ID
+			}
+			if folder == wt.Name {
+				entry.Manifest.SetStatus(r.ID, status, message)
+				_ = entry.Manifest.Save(entry.Path)
+				return
+			}
+		}
+	}
 	targets := append([]Worktree(nil), entry.Worktrees...)
 	if entry.Manifest != nil {
 		seen := make(map[string]struct{}, len(targets))
@@ -130,9 +149,13 @@ func Remove(entry Entry, deleteBranches bool) error {
 			if folder == "" {
 				folder = r.ID
 			}
+			wtPath, err := WorktreePath(entry.Path, folder)
+			if err != nil {
+				return err
+			}
 			wt := Worktree{
 				Name:   folder,
-				Path:   filepath.Join(entry.Path, folder),
+				Path:   wtPath,
 				Branch: r.Branch,
 			}
 			if _, ok := seen[filepath.Clean(wt.Path)]; !ok {
@@ -143,8 +166,12 @@ func Remove(entry Entry, deleteBranches bool) error {
 	}
 
 	for _, wt := range targets {
+		mark(wt, StatusRemoving, "")
 		if !git.IsRepo(wt.Path) {
-			_ = os.RemoveAll(wt.Path)
+			if err := os.RemoveAll(wt.Path); err != nil {
+				mark(wt, StatusFailed, err.Error())
+				return fmt.Errorf("%s: %w", wt.Name, err)
+			}
 			continue
 		}
 		var gitDir string
@@ -152,15 +179,18 @@ func Remove(entry Entry, deleteBranches bool) error {
 			var err error
 			gitDir, err = git.CommonDir(wt.Path)
 			if err != nil {
+				mark(wt, StatusFailed, err.Error())
 				return fmt.Errorf("%s: %w", wt.Name, err)
 			}
 		}
 		branch := wt.Branch
 		if err := git.RemoveWorktree(wt.Path); err != nil {
+			mark(wt, StatusFailed, err.Error())
 			return fmt.Errorf("%s: %w", wt.Name, err)
 		}
 		if deleteBranches && gitDir != "" && branch != "" && branch != "HEAD" {
 			if err := git.DeleteBranch(gitDir, branch); err != nil {
+				mark(wt, StatusFailed, err.Error())
 				return fmt.Errorf("%s: %w", wt.Name, err)
 			}
 		}
@@ -194,7 +224,10 @@ func listWorktrees(dir string) []Worktree {
 		if !e.IsDir() || e.Name() == ManifestFile {
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
+		path, err := WorktreePath(dir, e.Name())
+		if err != nil {
+			continue
+		}
 		if !git.IsRepo(path) {
 			continue
 		}

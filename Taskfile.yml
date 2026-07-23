@@ -22,6 +22,7 @@ tasks:
         echo "  task branch -- my-proj repo  adopt current worktree branch"
         echo "  task list              list projects"
         echo "  task doctor            check deps"
+        echo "  task repair -- my-proj repair project state"
         echo "  task install           install to \$GOPATH/bin"
         echo ""
         echo "Run CLI directly:"
@@ -116,6 +117,12 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY}} doctor
+
+  repair:
+    desc: Reconcile a project manifest and worktrees
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repair {{.CLI_ARGS}}
 
   cursor:
     desc: Open project in Cursor (picker if no name)

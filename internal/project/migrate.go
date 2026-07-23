@@ -1,6 +1,7 @@
 package project
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 func EnsureManifest(cfg *config.Config, projectDir, name string) (*Manifest, error) {
 	if m, err := LoadManifest(projectDir); err == nil {
 		return m, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	m, err := MigrateManifest(cfg, projectDir, name)
 	if err != nil {

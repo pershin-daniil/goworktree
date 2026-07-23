@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -266,6 +267,12 @@ func DeleteBranch(gitDir, branch string) error {
 // origin/<base>. Local changes, including untracked files, are stashed and
 // restored around the operation. A failed rebase is aborted before returning.
 func SyncWorktree(repo, expectedBranch, base string) SyncResult {
+	return SyncWorktreeContext(context.Background(), repo, expectedBranch, base)
+}
+
+// SyncWorktreeContext lets callers bound fetch/rebase time and cancel an
+// interactive operation without leaving Git subprocesses running.
+func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string) SyncResult {
 	result := SyncResult{Status: SyncFailed}
 	if strings.TrimSpace(base) == "" {
 		result.Err = fmt.Errorf("base branch is empty")
@@ -292,7 +299,7 @@ func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 	}
 	result.From = from
 
-	if _, err := run(repo, "fetch", "origin"); err != nil {
+	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
 		result.Err = err
 		return result
 	}
@@ -320,9 +327,15 @@ func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 		return result
 	}
 	stashed := false
+	stashRef := ""
 	if dirty {
-		if _, err := run(repo, "stash", "push", "--include-untracked", "--message", "goworktree sync auto-stash"); err != nil {
+		if _, err := runContext(ctx, repo, "stash", "push", "--include-untracked", "--message", "goworktree sync auto-stash"); err != nil {
 			result.Err = err
+			return result
+		}
+		stashRef, err = revision(repo, "refs/stash")
+		if err != nil {
+			result.Err = fmt.Errorf("identify auto-stash: %w", err)
 			return result
 		}
 		stashed = true
@@ -332,14 +345,13 @@ func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 		if !stashed {
 			return nil
 		}
-		if _, err := run(repo, "stash", "apply", "--index", "stash@{0}"); err != nil {
+		if _, err := runContext(ctx, repo, "stash", "apply", "--index", stashRef); err != nil {
 			return err
 		}
-		_, err := run(repo, "stash", "drop", "stash@{0}")
-		return err
+		return dropStash(repo, stashRef)
 	}
 
-	if _, err := run(repo, "rebase", target); err != nil {
+	if _, err := runContext(ctx, repo, "rebase", target); err != nil {
 		_, _ = run(repo, "rebase", "--abort")
 		_, _ = run(repo, "reset", "--hard", from)
 		if restoreErr := restore(); restoreErr != nil {
@@ -392,6 +404,23 @@ func remoteBase(base string) string {
 func revision(repo, ref string) (string, error) {
 	out, err := run(repo, "rev-parse", "--verify", ref+"^{commit}")
 	return strings.TrimSpace(out), err
+}
+
+// dropStash removes the exact stash object after it was applied. Git's
+// `stash drop` only accepts reflog selectors, so locate its current selector
+// immediately instead of assuming it remains stash@{0}.
+func dropStash(repo, objectID string) error {
+	out, err := run(repo, "stash", "list", "--format=%H")
+	if err != nil {
+		return err
+	}
+	for i, id := range strings.Fields(out) {
+		if id == objectID {
+			_, err := run(repo, "reflog", "delete", "--rewrite", "--updateref", fmt.Sprintf("refs/stash@{%d}", i))
+			return err
+		}
+	}
+	return fmt.Errorf("auto-stash %s no longer exists", shortRevision(objectID))
 }
 
 func isDirty(repo string) (bool, error) {
@@ -459,7 +488,11 @@ func ScanRepos(root string, maxDepth int) ([]ScannedRepo, error) {
 }
 
 func run(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	return runContext(context.Background(), dir, args...)
+}
+
+func runContext(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

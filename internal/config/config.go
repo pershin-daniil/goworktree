@@ -11,15 +11,17 @@ import (
 
 const fileName = "config.json"
 const DefaultScanDepth = 3
+const DefaultCommandTimeoutSeconds = 300
 
 type Config struct {
-	CursorPath    string          `json:"cursor_path"`
-	GolandPath    string          `json:"goland_path"`
-	ReposRoot     string          `json:"repos_root"`
-	ProjectsRoot  string          `json:"projects_root"`
-	DefaultBranch string          `json:"default_branch"`
-	ScanDepth     int             `json:"scan_depth,omitempty"`
-	Repos         map[string]Repo `json:"repos,omitempty"`
+	CursorPath            string          `json:"cursor_path"`
+	GolandPath            string          `json:"goland_path"`
+	ReposRoot             string          `json:"repos_root"`
+	ProjectsRoot          string          `json:"projects_root"`
+	DefaultBranch         string          `json:"default_branch"`
+	ScanDepth             int             `json:"scan_depth,omitempty"`
+	CommandTimeoutSeconds int             `json:"command_timeout_seconds,omitempty"`
+	Repos                 map[string]Repo `json:"repos,omitempty"`
 }
 
 type Repo struct {
@@ -30,13 +32,14 @@ type Repo struct {
 
 func Default() *Config {
 	return &Config{
-		CursorPath:    DefaultCursorPath(),
-		GolandPath:    DefaultGolandPath(),
-		ReposRoot:     defaultReposRoot(),
-		ProjectsRoot:  defaultProjectsRoot(),
-		DefaultBranch: "main",
-		ScanDepth:     DefaultScanDepth,
-		Repos:         map[string]Repo{},
+		CursorPath:            DefaultCursorPath(),
+		GolandPath:            DefaultGolandPath(),
+		ReposRoot:             defaultReposRoot(),
+		ProjectsRoot:          defaultProjectsRoot(),
+		DefaultBranch:         "main",
+		ScanDepth:             DefaultScanDepth,
+		CommandTimeoutSeconds: DefaultCommandTimeoutSeconds,
+		Repos:                 map[string]Repo{},
 	}
 }
 
@@ -81,6 +84,9 @@ func Load() (*Config, error) {
 	if cfg.ScanDepth <= 0 {
 		cfg.ScanDepth = DefaultScanDepth
 	}
+	if cfg.CommandTimeoutSeconds <= 0 {
+		cfg.CommandTimeoutSeconds = DefaultCommandTimeoutSeconds
+	}
 	return cfg, nil
 }
 
@@ -97,6 +103,9 @@ func (c *Config) Save() error {
 	if c.ScanDepth <= 0 {
 		c.ScanDepth = DefaultScanDepth
 	}
+	if c.CommandTimeoutSeconds <= 0 {
+		c.CommandTimeoutSeconds = DefaultCommandTimeoutSeconds
+	}
 
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -105,7 +114,36 @@ func (c *Config) Save() error {
 	data = append(data, '\n')
 
 	path := filepath.Join(dir, fileName)
-	return os.WriteFile(path, data, 0o644)
+	return atomicWriteFile(path, data, 0o644)
+}
+
+func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".goworktree-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err = tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (c *Config) Exists() bool {

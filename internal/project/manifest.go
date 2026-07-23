@@ -12,9 +12,10 @@ import (
 const ManifestFile = ".goworktree.json"
 
 const (
-	StatusPending = "pending"
-	StatusReady   = "ready"
-	StatusFailed  = "failed"
+	StatusPending  = "pending"
+	StatusReady    = "ready"
+	StatusFailed   = "failed"
+	StatusRemoving = "removing"
 )
 
 type ManifestRepo struct {
@@ -46,6 +47,9 @@ func LoadManifest(projectDir string) (*Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
+	if err := m.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
 	return &m, nil
 }
 
@@ -55,7 +59,33 @@ func (m *Manifest) Save(projectDir string) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(ManifestPath(projectDir), data, 0o644)
+	if err := m.Validate(); err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	return atomicWriteFile(ManifestPath(projectDir), data, 0o644)
+}
+
+// Validate is backward compatible with legacy manifests whose folder is
+// empty, while rejecting traversal before a manifest reaches filesystem code.
+func (m *Manifest) Validate() error {
+	if err := ValidateName(m.Name); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(m.Repos))
+	for _, r := range m.Repos {
+		folder := r.Folder
+		if folder == "" {
+			folder = r.ID
+		}
+		if err := ValidateName(folder); err != nil {
+			return fmt.Errorf("repository %q folder: %w", r.ID, err)
+		}
+		if _, ok := seen[folder]; ok {
+			return fmt.Errorf("duplicate worktree folder %q", folder)
+		}
+		seen[folder] = struct{}{}
+	}
+	return nil
 }
 
 func NewManifest(name string, repos []ManifestRepo) *Manifest {

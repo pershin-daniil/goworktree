@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pershin-daniil/goworktree/internal/config"
 	"github.com/pershin-daniil/goworktree/internal/cursor"
@@ -30,6 +33,17 @@ func csvFlag(args []string, name string) []string {
 		}
 	}
 	return out
+}
+
+func uniqueIDs(ids []string) error {
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("repository %q was selected more than once", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 func isFlagWithValue(args []string, index int, name string) bool {
@@ -86,11 +100,21 @@ func runStart(args []string) error {
 		name = positional[0]
 	}
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if len(positional) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
 	}
-
-	projectDir := filepath.Join(cfg.ProjectsRoot, name)
+	projectDir, err := project.Path(cfg, name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		return err
+	}
+	lock, err := project.AcquireLock(projectDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
 
 	// Resume path: existing incomplete manifest.
 	if m, err := project.LoadManifest(projectDir); err == nil {
@@ -118,6 +142,8 @@ func runStart(args []string) error {
 		}
 		fmt.Printf("\ndone: %s\n", projectDir)
 		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("load manifest: %w (run `goworktree repair %s` to recover)", err, name)
 	}
 
 	if len(cfg.RepoNames()) == 0 {
@@ -128,8 +154,7 @@ func runStart(args []string) error {
 	if len(selected) == 0 {
 		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
 	}
-
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+	if err := uniqueIDs(selected); err != nil {
 		return err
 	}
 
@@ -207,10 +232,14 @@ func pickProject(cfg *config.Config, title string) (string, error) {
 	return tui.Pick(title, items)
 }
 
-func requireManifest(cfg *config.Config, name string) (projectDir string, m *project.Manifest, err error) {
+func requireManifest(cfg *config.Config, name string) (projectDir string, m *project.Manifest, lock *project.Lock, err error) {
 	projectDir, err = project.Dir(cfg, name)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
+	}
+	lock, err = project.AcquireLock(projectDir)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	hadManifest := false
 	if _, e := project.LoadManifest(projectDir); e == nil {
@@ -218,18 +247,20 @@ func requireManifest(cfg *config.Config, name string) (projectDir string, m *pro
 	}
 	m, err = project.EnsureManifest(cfg, projectDir, name)
 	if err != nil {
-		return "", nil, err
+		_ = lock.Release()
+		return "", nil, nil, err
 	}
 	if !hadManifest {
 		fmt.Printf("migrated manifest for %q (%d repos)\n", name, len(m.Repos))
 	}
 	if removed := m.DeduplicateRepos(); removed > 0 {
 		if err := m.Save(projectDir); err != nil {
-			return "", nil, fmt.Errorf("repair duplicate repositories in manifest: %w", err)
+			_ = lock.Release()
+			return "", nil, nil, fmt.Errorf("repair duplicate repositories in manifest: %w", err)
 		}
 		fmt.Printf("repaired %q: removed %d duplicate repository entry(s)\n", name, removed)
 	}
-	return projectDir, m, nil
+	return projectDir, m, lock, nil
 }
 
 func runAdd(args []string) error {
@@ -253,10 +284,11 @@ func runAdd(args []string) error {
 		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
 	}
 
-	projectDir, m, err := requireManifest(cfg, name)
+	projectDir, m, lock, err := requireManifest(cfg, name)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = lock.Release() }()
 	inProject := map[string]struct{}{}
 	for _, id := range m.IDs() {
 		inProject[id] = struct{}{}
@@ -280,6 +312,9 @@ func runAdd(args []string) error {
 	selected := csvFlag(args, "--repos")
 	if len(selected) == 0 {
 		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
+	}
+	if err := uniqueIDs(selected); err != nil {
+		return err
 	}
 	allowed := make(map[string]bool, len(candidates))
 	for _, id := range candidates {
@@ -306,7 +341,10 @@ func runAdd(args []string) error {
 			fmt.Printf("  %s: base %q not found, using %s\n", cfg.DisplayName(id), preferred, base)
 		}
 		folder := cfg.FolderName(id, folderPool)
-		dest := filepath.Join(projectDir, folder)
+		dest, err := project.WorktreePath(projectDir, folder)
+		if err != nil {
+			return err
+		}
 		if _, err := os.Stat(dest); err == nil {
 			return fmt.Errorf("destination already exists: %s", dest)
 		}
@@ -364,14 +402,15 @@ func runDrop(args []string) error {
 	if len(positional) > 0 {
 		name = positional[0]
 	}
-	if name == "" {
+	if len(positional) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
 	}
 
-	projectDir, m, err := requireManifest(cfg, name)
+	projectDir, m, lock, err := requireManifest(cfg, name)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = lock.Release() }()
 	if len(m.Repos) == 0 {
 		return fmt.Errorf("project %q has no repositories", name)
 	}
@@ -379,6 +418,9 @@ func runDrop(args []string) error {
 	selected := csvFlag(args, "--repos")
 	if len(selected) == 0 {
 		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
+	}
+	if err := uniqueIDs(selected); err != nil {
+		return err
 	}
 
 	msg := fmt.Sprintf("Drop %d repo(s) from project %q?\n\nProject folder stays; other worktrees are untouched.",
@@ -399,33 +441,51 @@ func runDrop(args []string) error {
 		if folder == "" {
 			folder = r.ID
 		}
-		wtPath := filepath.Join(projectDir, folder)
+		wtPath, err := project.WorktreePath(projectDir, folder)
+		if err != nil {
+			return err
+		}
 		fmt.Printf("  dropping %s\n", folder)
+		m.AddRepo(r)
+		m.SetStatus(id, project.StatusRemoving, "")
+		if err := m.Save(projectDir); err != nil {
+			return fmt.Errorf("save manifest: %w", err)
+		}
 
 		if git.IsRepo(wtPath) {
 			var gitDir string
 			if deleteBranches {
 				gitDir, err = git.CommonDir(wtPath)
 				if err != nil {
+					m.SetStatus(id, project.StatusFailed, err.Error())
+					_ = m.Save(projectDir)
 					return fmt.Errorf("%s: %w", folder, err)
 				}
 			}
 			branch := r.Branch
 			if err := git.RemoveWorktree(wtPath); err != nil {
+				m.SetStatus(id, project.StatusFailed, err.Error())
+				_ = m.Save(projectDir)
 				return fmt.Errorf("%s: %w", folder, err)
 			}
 			if deleteBranches && gitDir != "" && branch != "" && branch != "HEAD" {
 				if err := git.DeleteBranch(gitDir, branch); err != nil {
+					m.SetStatus(id, project.StatusFailed, err.Error())
+					_ = m.Save(projectDir)
 					return fmt.Errorf("%s: %w", folder, err)
 				}
 			}
 		} else {
-			_ = os.RemoveAll(wtPath)
+			if err := os.RemoveAll(wtPath); err != nil {
+				m.SetStatus(id, project.StatusFailed, err.Error())
+				_ = m.Save(projectDir)
+				return fmt.Errorf("%s: %w", folder, err)
+			}
 		}
-	}
-
-	if err := m.Save(projectDir); err != nil {
-		return err
+		m.RemoveRepo(id)
+		if err := m.Save(projectDir); err != nil {
+			return fmt.Errorf("save manifest: %w", err)
+		}
 	}
 	fmt.Printf("\ndropped from %s (%d repos left)\n", m.Name, len(m.Repos))
 	return nil
@@ -441,14 +501,15 @@ func runSync(args []string) error {
 	if len(args) > 0 {
 		name = args[0]
 	}
-	if name == "" {
+	if len(args) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree sync <project>")
 	}
 
-	projectDir, m, err := requireManifest(cfg, name)
+	projectDir, m, lock, err := requireManifest(cfg, name)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = lock.Release() }()
 	if len(m.Repos) == 0 {
 		return fmt.Errorf("project %q has no repositories", name)
 	}
@@ -461,8 +522,13 @@ func runSync(args []string) error {
 		if folder == "" {
 			folder = r.ID
 		}
-		wtPath := filepath.Join(projectDir, folder)
-		result := git.SyncWorktree(wtPath, r.Branch, r.Base)
+		wtPath, err := project.WorktreePath(projectDir, folder)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.CommandTimeoutSeconds)*time.Second)
+		result := git.SyncWorktreeContext(ctx, wtPath, r.Branch, r.Base)
+		cancel()
 		counts[result.Status]++
 		switch result.Status {
 		case git.SyncRebased:
@@ -500,14 +566,15 @@ func runBranch(args []string) error {
 	if len(args) > 0 {
 		name = args[0]
 	}
-	if name == "" {
+	if len(args) != 2 || name == "" {
 		return fmt.Errorf("usage: goworktree branch <project> <repo>")
 	}
 
-	projectDir, m, err := requireManifest(cfg, name)
+	projectDir, m, lock, err := requireManifest(cfg, name)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = lock.Release() }()
 	if len(m.Repos) == 0 {
 		return fmt.Errorf("project %q has no repositories", name)
 	}
@@ -542,7 +609,11 @@ func runBranch(args []string) error {
 	if folder == "" {
 		folder = r.ID
 	}
-	branch, err := git.CurrentBranch(filepath.Join(projectDir, folder))
+	wtPath, err := project.WorktreePath(projectDir, folder)
+	if err != nil {
+		return err
+	}
+	branch, err := git.CurrentBranch(wtPath)
 	if err != nil {
 		return fmt.Errorf("%s: read current branch: %w", folder, err)
 	}
@@ -578,7 +649,7 @@ func runCursor(args []string) error {
 	if len(args) > 0 {
 		name = args[0]
 	}
-	if name == "" {
+	if len(args) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree cursor <project>")
 	}
 
@@ -599,7 +670,7 @@ func runGoland(args []string) error {
 	if len(args) > 0 {
 		name = args[0]
 	}
-	if name == "" {
+	if len(args) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree goland <project>")
 	}
 
@@ -651,7 +722,7 @@ func runRemove(args []string) error {
 	if len(positional) > 0 {
 		name = positional[0]
 	}
-	if name == "" {
+	if len(positional) != 1 || name == "" {
 		return fmt.Errorf("usage: goworktree remove <project> [-D] [--yes]")
 	}
 
@@ -659,6 +730,11 @@ func runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
+	lock, err := project.AcquireLock(entry.Path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
 
 	msg := fmt.Sprintf("Remove project %q?\n\n%s\n%d worktree(s) will be deleted.",
 		entry.Name, entry.Path, len(entry.Worktrees))
@@ -728,6 +804,34 @@ func runDoctor() error {
 	return nil
 }
 
+func runRepair(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: goworktree repair <project>")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	projectDir, err := project.Dir(cfg, args[0])
+	if err != nil {
+		return err
+	}
+	lock, err := project.AcquireLock(projectDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+	_, result, err := project.Repair(cfg, projectDir, args[0])
+	if err != nil {
+		return err
+	}
+	if result.Recovered {
+		fmt.Println("preserved corrupt manifest and rebuilt it from worktrees")
+	}
+	fmt.Printf("repaired %q: %d deduplicated, %d missing, %d repositories pruned\n", args[0], result.Deduplicated, result.Missing, result.Pruned)
+	return nil
+}
+
 func runConfigShow() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -761,6 +865,12 @@ func runConfigSet(key, value string) error {
 			return fmt.Errorf("scan_depth must be a positive integer")
 		}
 		cfg.ScanDepth = n
+	case "command_timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("command_timeout_seconds must be a positive integer")
+		}
+		cfg.CommandTimeoutSeconds = n
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}

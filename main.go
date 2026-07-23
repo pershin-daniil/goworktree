@@ -54,6 +54,8 @@ func main() {
 		err = runOpen(os.Args[2:])
 	case "doctor":
 		err = runDoctor()
+	case "repair":
+		err = runRepair(os.Args[2:])
 	case "config":
 		err = runConfig(os.Args[2:])
 	case "repos":
@@ -96,7 +98,7 @@ func runConfig(args []string) error {
 	case "edit":
 		return runConfigEdit()
 	case "set":
-		if len(args) < 3 {
+		if len(args) != 3 {
 			return fmt.Errorf("usage: goworktree config set <key> <value>")
 		}
 		return runConfigSet(args[1], args[2])
@@ -153,6 +155,7 @@ usage:
   goworktree goland <project>
   goworktree open [project]        alias for cursor
   goworktree doctor
+  goworktree repair <project>     validate and reconcile project state
   goworktree config [show|edit|set <key> <value>]
   goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
 
@@ -160,6 +163,7 @@ notes:
   without arguments, goworktree starts the unified interactive dashboard
   explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
+  repair preserves a corrupt manifest before rebuilding it from worktrees
   remove -D fully clears project worktrees and LOCAL branches; remotes are untouched
   drop -D deletes only LOCAL branches; remotes are untouched
   add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
