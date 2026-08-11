@@ -70,12 +70,16 @@ func Find(cfg *config.Config, name string) (Entry, error) {
 func loadEntry(name, path string) Entry {
 	if m, err := LoadManifest(path); err == nil {
 		trees := make([]Worktree, 0, len(m.Repos))
+		seen := make(map[string]struct{}, len(m.Repos))
 		for _, r := range m.Repos {
 			folder := r.Folder
 			if folder == "" {
 				folder = r.ID
 			}
-			wtPath := filepath.Join(path, folder)
+			wtPath, pathErr := WorktreePath(path, folder)
+			if pathErr != nil {
+				continue
+			}
 			branch := r.Branch
 			if git.IsRepo(wtPath) {
 				if b, err := git.CurrentBranch(wtPath); err == nil {
@@ -88,6 +92,15 @@ func loadEntry(name, path string) Entry {
 				Branch: branch,
 				Status: r.Status,
 			})
+			seen[filepath.Clean(wtPath)] = struct{}{}
+		}
+		// A manifest is resumable state, not an authority over Git. Include
+		// worktrees found on disk as well so remove can clean up leftovers from
+		// interrupted creates and older manifests.
+		for _, wt := range listWorktrees(path) {
+			if _, ok := seen[filepath.Clean(wt.Path)]; !ok {
+				trees = append(trees, wt)
+			}
 		}
 		return Entry{
 			Name:      name,
@@ -109,25 +122,56 @@ func loadEntry(name, path string) Entry {
 
 // Remove deletes every worktree in the project group, then the project folder.
 func Remove(entry Entry, deleteBranches bool) error {
-	targets := entry.Worktrees
-	if entry.Manifest != nil {
-		targets = nil
+	mark := func(wt Worktree, status, message string) {
+		if entry.Manifest == nil {
+			return
+		}
 		for _, r := range entry.Manifest.Repos {
 			folder := r.Folder
 			if folder == "" {
 				folder = r.ID
 			}
-			targets = append(targets, Worktree{
+			if folder == wt.Name {
+				entry.Manifest.SetStatus(r.ID, status, message)
+				_ = entry.Manifest.Save(entry.Path)
+				return
+			}
+		}
+	}
+	targets := append([]Worktree(nil), entry.Worktrees...)
+	if entry.Manifest != nil {
+		seen := make(map[string]struct{}, len(targets))
+		for _, wt := range targets {
+			seen[filepath.Clean(wt.Path)] = struct{}{}
+		}
+		for _, r := range entry.Manifest.Repos {
+			folder := r.Folder
+			if folder == "" {
+				folder = r.ID
+			}
+			wtPath, err := WorktreePath(entry.Path, folder)
+			if err != nil {
+				return err
+			}
+			wt := Worktree{
 				Name:   folder,
-				Path:   filepath.Join(entry.Path, folder),
+				Path:   wtPath,
 				Branch: r.Branch,
-			})
+			}
+			if _, ok := seen[filepath.Clean(wt.Path)]; !ok {
+				targets = append(targets, wt)
+				seen[filepath.Clean(wt.Path)] = struct{}{}
+			}
 		}
 	}
 
 	for _, wt := range targets {
+		mark(wt, StatusRemoving, "")
 		if !git.IsRepo(wt.Path) {
-			_ = os.RemoveAll(wt.Path)
+			if err := os.RemoveAll(wt.Path); err != nil {
+				mark(wt, StatusFailed, err.Error())
+				return fmt.Errorf("%s: %w", wt.Name, err)
+			}
 			continue
 		}
 		var gitDir string
@@ -135,16 +179,33 @@ func Remove(entry Entry, deleteBranches bool) error {
 			var err error
 			gitDir, err = git.CommonDir(wt.Path)
 			if err != nil {
+				mark(wt, StatusFailed, err.Error())
 				return fmt.Errorf("%s: %w", wt.Name, err)
 			}
 		}
 		branch := wt.Branch
 		if err := git.RemoveWorktree(wt.Path); err != nil {
+			mark(wt, StatusFailed, err.Error())
 			return fmt.Errorf("%s: %w", wt.Name, err)
 		}
 		if deleteBranches && gitDir != "" && branch != "" && branch != "HEAD" {
 			if err := git.DeleteBranch(gitDir, branch); err != nil {
+				mark(wt, StatusFailed, err.Error())
 				return fmt.Errorf("%s: %w", wt.Name, err)
+			}
+		}
+	}
+
+	// A broken linked worktree may no longer be usable as a Git command
+	// directory, so RemoveWorktree cannot determine its common Git directory.
+	// Prune every repository named by the manifest as a final cleanup pass.
+	if entry.Manifest != nil {
+		for _, r := range entry.Manifest.Repos {
+			if r.Path == "" || !git.IsRepo(r.Path) {
+				continue
+			}
+			if err := git.PruneWorktrees(r.Path); err != nil {
+				return fmt.Errorf("prune %s: %w", r.ID, err)
 			}
 		}
 	}
@@ -163,7 +224,10 @@ func listWorktrees(dir string) []Worktree {
 		if !e.IsDir() || e.Name() == ManifestFile {
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
+		path, err := WorktreePath(dir, e.Name())
+		if err != nil {
+			continue
+		}
 		if !git.IsRepo(path) {
 			continue
 		}

@@ -72,3 +72,48 @@ func TestContainsAddRemoveIDs(t *testing.T) {
 		t.Fatal("expected missing remove to fail")
 	}
 }
+
+func TestManifestRejectsAndRepairsDuplicateRepoPaths(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManifest("ticket", []ManifestRepo{
+		{ID: "legacy", Folder: "repo", Path: repo, Status: StatusReady},
+		{ID: "stable", Folder: "group-repo", Path: filepath.Join(dir, ".", "repo"), Status: StatusFailed},
+	})
+	if removed := m.DeduplicateRepos(); removed != 1 {
+		t.Fatalf("DeduplicateRepos removed %d, want 1", removed)
+	}
+	if len(m.Repos) != 1 || m.Repos[0].ID != "legacy" || m.Repos[0].Status != StatusReady {
+		t.Fatalf("DeduplicateRepos = %+v", m.Repos)
+	}
+
+	m.AddRepo(ManifestRepo{ID: "another-id", Path: repo, Status: StatusPending})
+	if len(m.Repos) != 1 {
+		t.Fatalf("AddRepo added duplicate path: %+v", m.Repos)
+	}
+}
+
+func TestDeduplicateReposPrefersReadyEntry(t *testing.T) {
+	m := NewManifest("ticket", []ManifestRepo{
+		{ID: "failed", Path: "/repos/api", Status: StatusFailed},
+		{ID: "ready", Path: "/repos/api", Status: StatusReady},
+	})
+	m.DeduplicateRepos()
+	if len(m.Repos) != 1 || m.Repos[0].ID != "ready" {
+		t.Fatalf("DeduplicateRepos = %+v", m.Repos)
+	}
+}
+
+func TestSetBranch(t *testing.T) {
+	m := NewManifest("ticket", []ManifestRepo{{ID: "api", Branch: "ticket"}})
+	if !m.SetBranch("api", "team/ticket") || m.Repos[0].Branch != "team/ticket" {
+		t.Fatalf("SetBranch = %+v", m.Repos)
+	}
+	if m.SetBranch("missing", "other") {
+		t.Fatal("SetBranch unexpectedly updated a missing repository")
+	}
+}

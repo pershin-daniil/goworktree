@@ -5,21 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 const fileName = "config.json"
 const DefaultScanDepth = 3
+const DefaultCommandTimeoutSeconds = 300
+
+const (
+	ProgramCursor = "cursor"
+	ProgramGoland = "goland"
+)
+
+type Program struct {
+	Name    string   `json:"name"`
+	Path    string   `json:"path"`
+	Args    []string `json:"args,omitempty"`
+	Enabled bool     `json:"enabled"`
+}
 
 type Config struct {
-	CursorPath    string          `json:"cursor_path"`
-	GolandPath    string          `json:"goland_path"`
-	ReposRoot     string          `json:"repos_root"`
-	ProjectsRoot  string          `json:"projects_root"`
-	DefaultBranch string          `json:"default_branch"`
-	ScanDepth     int             `json:"scan_depth,omitempty"`
-	Repos         map[string]Repo `json:"repos,omitempty"`
+	OpenWith              map[string]Program `json:"open_with"`
+	DefaultProgram        string             `json:"default_program"`
+	ReposRoot             string             `json:"repos_root"`
+	ProjectsRoot          string             `json:"projects_root"`
+	DefaultBranch         string             `json:"default_branch"`
+	ScanDepth             int                `json:"scan_depth,omitempty"`
+	CommandTimeoutSeconds int                `json:"command_timeout_seconds,omitempty"`
+	Repos                 map[string]Repo    `json:"repos,omitempty"`
 }
 
 type Repo struct {
@@ -30,13 +46,17 @@ type Repo struct {
 
 func Default() *Config {
 	return &Config{
-		CursorPath:    DefaultCursorPath(),
-		GolandPath:    DefaultGolandPath(),
-		ReposRoot:     defaultReposRoot(),
-		ProjectsRoot:  defaultProjectsRoot(),
-		DefaultBranch: "main",
-		ScanDepth:     DefaultScanDepth,
-		Repos:         map[string]Repo{},
+		OpenWith: map[string]Program{
+			ProgramCursor: {Name: "Cursor", Path: DefaultCursorPath(), Enabled: true},
+			ProgramGoland: {Name: "GoLand", Path: DefaultGolandPath(), Enabled: true},
+		},
+		DefaultProgram:        ProgramCursor,
+		ReposRoot:             defaultReposRoot(),
+		ProjectsRoot:          defaultProjectsRoot(),
+		DefaultBranch:         "main",
+		ScanDepth:             DefaultScanDepth,
+		CommandTimeoutSeconds: DefaultCommandTimeoutSeconds,
+		Repos:                 map[string]Repo{},
 	}
 }
 
@@ -74,6 +94,34 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if _, ok := fields["open_with"]; !ok {
+		legacy := struct {
+			CursorPath    string `json:"cursor_path"`
+			GolandPath    string `json:"goland_path"`
+			CursorEnabled bool   `json:"cursor_enabled"`
+			GolandEnabled bool   `json:"goland_enabled"`
+		}{CursorEnabled: true, GolandEnabled: true}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return nil, fmt.Errorf("parse legacy programs: %w", err)
+		}
+		if legacy.CursorPath == "" {
+			legacy.CursorPath = DefaultCursorPath()
+		}
+		if legacy.GolandPath == "" {
+			legacy.GolandPath = DefaultGolandPath()
+		}
+		cfg.OpenWith = map[string]Program{
+			ProgramCursor: {Name: "Cursor", Path: legacy.CursorPath, Enabled: legacy.CursorEnabled},
+			ProgramGoland: {Name: "GoLand", Path: legacy.GolandPath, Enabled: legacy.GolandEnabled},
+		}
+	}
+	if cfg.OpenWith == nil {
+		cfg.OpenWith = map[string]Program{}
+	}
 	cfg.expandPaths()
 	if cfg.Repos == nil {
 		cfg.Repos = map[string]Repo{}
@@ -81,6 +129,10 @@ func Load() (*Config, error) {
 	if cfg.ScanDepth <= 0 {
 		cfg.ScanDepth = DefaultScanDepth
 	}
+	if cfg.CommandTimeoutSeconds <= 0 {
+		cfg.CommandTimeoutSeconds = DefaultCommandTimeoutSeconds
+	}
+	cfg.NormalizePrograms()
 	return cfg, nil
 }
 
@@ -97,6 +149,10 @@ func (c *Config) Save() error {
 	if c.ScanDepth <= 0 {
 		c.ScanDepth = DefaultScanDepth
 	}
+	if c.CommandTimeoutSeconds <= 0 {
+		c.CommandTimeoutSeconds = DefaultCommandTimeoutSeconds
+	}
+	c.NormalizePrograms()
 
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -105,7 +161,115 @@ func (c *Config) Save() error {
 	data = append(data, '\n')
 
 	path := filepath.Join(dir, fileName)
-	return os.WriteFile(path, data, 0o644)
+	return atomicWriteFile(path, data, 0o644)
+}
+
+// EnabledPrograms returns program identifiers in stable ID order.
+func (c *Config) EnabledPrograms() []string {
+	programs := make([]string, 0, len(c.OpenWith))
+	for id, program := range c.OpenWith {
+		if program.Enabled {
+			programs = append(programs, id)
+		}
+	}
+	sort.Strings(programs)
+	return programs
+}
+
+func (c *Config) ProgramEnabled(program string) bool {
+	p, ok := c.OpenWith[program]
+	return ok && p.Enabled
+}
+
+func (c *Config) Program(id string) (Program, bool) { p, ok := c.OpenWith[id]; return p, ok }
+
+func (c *Config) ProgramIDs() []string {
+	ids := make([]string, 0, len(c.OpenWith))
+	for id := range c.OpenWith {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func ValidProgramID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			if i == 0 && (r == '_' || r == '-') {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func ValidateProgramPath(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("program path is required")
+	}
+	if strings.ContainsRune(path, os.PathSeparator) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("program path %q: %w", path, err)
+		}
+		if info.IsDir() || info.Mode()&0o111 == 0 {
+			return fmt.Errorf("program path %q is not executable", path)
+		}
+		return nil
+	}
+	if _, err := exec.LookPath(path); err != nil {
+		return fmt.Errorf("program command %q is not in PATH", path)
+	}
+	return nil
+}
+
+// NormalizePrograms keeps the selected default usable after a setting change.
+// An empty default is permitted only when every program is disabled.
+func (c *Config) NormalizePrograms() {
+	if c.ProgramEnabled(c.DefaultProgram) {
+		return
+	}
+	programs := c.EnabledPrograms()
+	if len(programs) == 0 {
+		c.DefaultProgram = ""
+		return
+	}
+	c.DefaultProgram = programs[0]
+}
+
+func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".goworktree-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err = tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (c *Config) Exists() bool {
@@ -239,14 +403,16 @@ func (c *Config) FolderName(id string, selected []string) string {
 }
 
 func (c *Config) expandPaths() {
-	c.CursorPath = expandHome(c.CursorPath)
-	c.GolandPath = expandHome(c.GolandPath)
 	c.ReposRoot = expandHome(c.ReposRoot)
 	c.ProjectsRoot = expandHome(c.ProjectsRoot)
 
 	for name, repo := range c.Repos {
 		repo.Path = expandHome(repo.Path)
 		c.Repos[name] = repo
+	}
+	for id, program := range c.OpenWith {
+		program.Path = expandHome(program.Path)
+		c.OpenWith[id] = program
 	}
 }
 

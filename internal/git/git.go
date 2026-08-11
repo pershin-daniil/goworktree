@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,23 @@ type ScannedRepo struct {
 	ID    string
 	Path  string
 	Alias string
+}
+
+type SyncStatus string
+
+const (
+	SyncRebased    SyncStatus = "rebased"
+	SyncUpToDate   SyncStatus = "up-to-date"
+	SyncConflict   SyncStatus = "conflict"
+	SyncRolledBack SyncStatus = "rolled-back"
+	SyncFailed     SyncStatus = "failed"
+)
+
+type SyncResult struct {
+	Status SyncStatus
+	From   string
+	To     string
+	Err    error
 }
 
 func IsRepo(path string) bool {
@@ -190,6 +208,17 @@ func prune(gitDir string) error {
 	return exec.Command("git", "--git-dir="+gitDir, "worktree", "prune").Run()
 }
 
+// PruneWorktrees removes stale worktree registrations from a primary repository.
+// It is useful after a project folder was removed while one of its linked
+// worktrees was already broken on disk.
+func PruneWorktrees(repo string) error {
+	gitDir, err := CommonDir(repo)
+	if err != nil {
+		return err
+	}
+	return prune(gitDir)
+}
+
 func CommonDir(path string) (string, error) {
 	out, err := run(path, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -233,6 +262,215 @@ func DeleteBranch(gitDir, branch string) error {
 		return fmt.Errorf("git branch -D %s: %s", branch, msg)
 	}
 	return nil
+}
+
+// SyncWorktree fetches origin and rebases the checked-out project branch onto
+// origin/<base>. Local changes, including untracked files, are stashed and
+// restored around the operation. A rebase conflict in a clean worktree is
+// intentionally left in place so the caller can open the worktree for manual
+// resolution and retry this operation. Conflicts after auto-stashing are still
+// rolled back, because restoring that stash safely requires the original tree.
+func SyncWorktree(repo, expectedBranch, base string) SyncResult {
+	return SyncWorktreeContext(context.Background(), repo, expectedBranch, base)
+}
+
+// SyncWorktreeContext lets callers bound fetch/rebase time and cancel an
+// interactive operation without leaving Git subprocesses running.
+func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string) SyncResult {
+	result := SyncResult{Status: SyncFailed}
+	if strings.TrimSpace(base) == "" {
+		result.Err = fmt.Errorf("base branch is empty")
+		return result
+	}
+	// During a rebase HEAD is detached, so this must run before normal branch
+	// validation. The expected branch was validated when the rebase began.
+	if rebaseInProgress(repo) {
+		if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
+			if rebaseInProgress(repo) {
+				result.Status = SyncConflict
+				result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry sync: %w", err)
+				return result
+			}
+			result.Err = fmt.Errorf("continue rebase: %w", err)
+			return result
+		}
+		result.Status = SyncRebased
+		if head, err := revision(repo, "HEAD"); err == nil {
+			result.To = head
+		}
+		return result
+	}
+	branch, err := CurrentBranch(repo)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if branch == "HEAD" {
+		result.Err = fmt.Errorf("detached HEAD")
+		return result
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		result.Err = fmt.Errorf("current branch %q, expected %q", branch, expectedBranch)
+		return result
+	}
+
+	from, err := revision(repo, "HEAD")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	result.From = from
+
+	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
+		result.Err = err
+		return result
+	}
+	target := remoteBase(base)
+	to, err := revision(repo, target)
+	if err != nil {
+		result.Err = fmt.Errorf("base %s: %w", target, err)
+		return result
+	}
+	result.To = to
+
+	alreadyBased, err := isAncestor(repo, to, from)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if alreadyBased {
+		result.Status = SyncUpToDate
+		return result
+	}
+
+	dirty, err := isDirty(repo)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	stashed := false
+	stashRef := ""
+	if dirty {
+		if _, err := runContext(ctx, repo, "stash", "push", "--include-untracked", "--message", "goworktree sync auto-stash"); err != nil {
+			result.Err = err
+			return result
+		}
+		stashRef, err = revision(repo, "refs/stash")
+		if err != nil {
+			result.Err = fmt.Errorf("identify auto-stash: %w", err)
+			return result
+		}
+		stashed = true
+	}
+
+	restore := func() error {
+		if !stashed {
+			return nil
+		}
+		if _, err := runContext(ctx, repo, "stash", "apply", "--index", stashRef); err != nil {
+			return err
+		}
+		return dropStash(repo, stashRef)
+	}
+
+	if _, err := runContext(ctx, repo, "rebase", target); err != nil {
+		if !stashed && rebaseInProgress(repo) {
+			result.Status = SyncConflict
+			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it, stage the files, then retry sync", target)
+			return result
+		}
+		_, _ = run(repo, "rebase", "--abort")
+		_, _ = run(repo, "reset", "--hard", from)
+		if restoreErr := restore(); restoreErr != nil {
+			result.Err = fmt.Errorf("rebase failed: %v; rollback auto-stash restore failed: %w (stash preserved)", err, restoreErr)
+			return result
+		}
+		result.Status = SyncRolledBack
+		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", target, shortRevision(from))
+		result.To = from
+		return result
+	}
+	if err := restore(); err == nil {
+		result.Status = SyncRebased
+		if head, headErr := revision(repo, "HEAD"); headErr == nil {
+			result.To = head
+		}
+		return result
+	}
+
+	// Applying the stash on the new commit conflicted. Remove only files created
+	// by that failed apply, return to the original commit, and restore the stash
+	// against the exact tree it came from.
+	_, _ = run(repo, "reset", "--hard", from)
+	_, _ = run(repo, "clean", "-fd")
+	if err := restore(); err != nil {
+		result.Err = fmt.Errorf("rollback to %s succeeded, but auto-stash restore failed: %w (stash preserved)", from, err)
+		return result
+	}
+	result.Status = SyncRolledBack
+	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", target, from)
+	result.To = from
+	return result
+}
+
+func rebaseInProgress(repo string) bool {
+	_, err := run(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD")
+	return err == nil
+}
+
+func shortRevision(revision string) string {
+	if len(revision) > 12 {
+		return revision[:12]
+	}
+	return revision
+}
+
+func remoteBase(base string) string {
+	base = strings.TrimSpace(base)
+	base = strings.TrimPrefix(base, "refs/heads/")
+	base = strings.TrimPrefix(base, "refs/remotes/origin/")
+	base = strings.TrimPrefix(base, "origin/")
+	return "origin/" + base
+}
+
+func revision(repo, ref string) (string, error) {
+	out, err := run(repo, "rev-parse", "--verify", ref+"^{commit}")
+	return strings.TrimSpace(out), err
+}
+
+// dropStash removes the exact stash object after it was applied. Git's
+// `stash drop` only accepts reflog selectors, so locate its current selector
+// immediately instead of assuming it remains stash@{0}.
+func dropStash(repo, objectID string) error {
+	out, err := run(repo, "stash", "list", "--format=%H")
+	if err != nil {
+		return err
+	}
+	for i, id := range strings.Fields(out) {
+		if id == objectID {
+			_, err := run(repo, "reflog", "delete", "--rewrite", "--updateref", fmt.Sprintf("refs/stash@{%d}", i))
+			return err
+		}
+	}
+	return fmt.Errorf("auto-stash %s no longer exists", shortRevision(objectID))
+}
+
+func isDirty(repo string) (bool, error) {
+	out, err := run(repo, "status", "--porcelain", "--untracked-files=normal")
+	return strings.TrimSpace(out) != "", err
+}
+
+func isAncestor(repo, older, newer string) (bool, error) {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", older, newer)
+	cmd.Dir = repo
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
 // ScanRepos walks root up to maxDepth levels and returns primary clones only.
@@ -282,7 +520,11 @@ func ScanRepos(root string, maxDepth int) ([]ScannedRepo, error) {
 }
 
 func run(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	return runContext(context.Background(), dir, args...)
+}
+
+func runContext(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -19,12 +19,27 @@ func FormatConfig(cfg *config.Config, path string) string {
 	b.WriteString("\n\n")
 
 	rows := [][]string{
-		{"cursor", cfg.CursorPath},
-		{"goland", cfg.GolandPath},
+		{"default_program", programLabel(cfg, cfg.DefaultProgram)},
 		{"repos", cfg.ReposRoot},
 		{"projects", cfg.ProjectsRoot},
 		{"branch", cfg.DefaultBranch},
 		{"scan_depth", fmt.Sprintf("%d", cfg.ScanDepth)},
+	}
+	if len(cfg.OpenWith) > 0 {
+		b.WriteString("\n")
+		b.WriteString(labelStyle.Render("open with"))
+		b.WriteString("\n")
+		for _, id := range cfg.ProgramIDs() {
+			p, _ := cfg.Program(id)
+			state := "disabled"
+			if p.Enabled {
+				state = "enabled"
+			}
+			if cfg.DefaultProgram == id {
+				state += ", default"
+			}
+			b.WriteString(fmt.Sprintf("  %s  %s  %s\n", id, p.Name, p.Path+" ("+state+")"))
+		}
 	}
 	for _, row := range rows {
 		b.WriteString(fmt.Sprintf("  %s  %s\n",

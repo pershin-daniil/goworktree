@@ -74,8 +74,6 @@ func newInitModel(cfg *config.Config, needsConfirm bool) initModel {
 	}
 
 	defs := []struct{ label, desc, value string }{
-		{"Cursor executable", "Path to Cursor or command from PATH", cfg.CursorPath},
-		{"GoLand executable", "Path to GoLand or command from PATH", cfg.GolandPath},
 		{"Repositories root", "Directory with your git repositories", cfg.ReposRoot},
 		{"Projects root", "Where worktree projects are created", cfg.ProjectsRoot},
 		{"Default branch", "Fallback branch for repositories", cfg.DefaultBranch},
@@ -214,8 +212,6 @@ func (m initModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *initModel) applyForm() {
 	keys := []func(string){
-		func(v string) { m.cfg.CursorPath = v },
-		func(v string) { m.cfg.GolandPath = v },
 		func(v string) { m.cfg.ReposRoot = v },
 		func(v string) { m.cfg.ProjectsRoot = v },
 		func(v string) { m.cfg.DefaultBranch = v },

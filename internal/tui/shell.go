@@ -12,15 +12,17 @@ import (
 // ShellActions wires package-main command runners into the home menu.
 // Use nil for optional actions you do not expose.
 type ShellActions struct {
-	Start   func() error
-	Add     func() error
-	Drop    func() error
-	List    func() error
-	Cursor  func() error
-	Goland  func() error
-	Remove  func() error
-	Doctor  func() error
-	Config  func() error
+	Start  func() error
+	Add    func() error
+	Drop   func() error
+	Sync   func() error
+	Branch func() error
+	List   func() error
+	Cursor func() error
+	Goland func() error
+	Remove func() error
+	Doctor func() error
+	Config func() error
 }
 
 type shellItem struct {
@@ -46,10 +48,12 @@ func newShellModel(actions ShellActions) shellModel {
 		shellItem{"start", "Start project", "Create or resume a worktree group"},
 		shellItem{"add", "Add repos", "Add repositories to an existing project"},
 		shellItem{"drop", "Drop repos", "Remove repositories from a project"},
+		shellItem{"sync", "Sync project", "Rebase project branches onto their origin bases"},
+		shellItem{"branch", "Project branches", "Adopt a repository worktree's current branch"},
 		shellItem{"list", "List projects", "Show project groups"},
 		shellItem{"cursor", "Open Cursor", "Open a project in Cursor"},
 		shellItem{"goland", "Open GoLand", "Open a project in GoLand"},
-		shellItem{"remove", "Remove project", "Delete a whole project group"},
+		shellItem{"remove", "Remove project", "Fully delete project, worktrees, and local branches"},
 		shellItem{"doctor", "Doctor", "Check git, editors, and config"},
 		shellItem{"config", "Config show", "Print current configuration"},
 		shellItem{"quit", "Quit", "Exit goworktree"},
@@ -135,6 +139,16 @@ func runAction(id string, a ShellActions) error {
 			return fmt.Errorf("drop not available")
 		}
 		return a.Drop()
+	case "sync":
+		if a.Sync == nil {
+			return fmt.Errorf("sync not available")
+		}
+		return a.Sync()
+	case "branch":
+		if a.Branch == nil {
+			return fmt.Errorf("branch not available")
+		}
+		return a.Branch()
 	case "list":
 		if a.List == nil {
 			return fmt.Errorf("list not available")
@@ -173,7 +187,7 @@ func runAction(id string, a ShellActions) error {
 // shellNeedsPause: these dump to the main screen; pause before the alt-screen menu.
 func shellNeedsPause(id string) bool {
 	switch id {
-	case "list", "doctor", "config":
+	case "sync", "branch", "list", "doctor", "config":
 		return true
 	default:
 		return false

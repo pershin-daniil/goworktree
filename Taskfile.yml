@@ -14,12 +14,15 @@ tasks:
       - |
         echo ""
         echo "Quickstart:"
-        echo "  ./{{.BINARY}}             interactive home menu"
+        echo "  ./{{.BINARY}}             unified interactive dashboard"
         echo "  task init              interactive setup"
-        echo "  task start -- my-proj  create / resume project"
+        echo "  task start -- my-proj --repos api,web  create / resume project"
         echo "  task add / task drop   change repos in a project"
+        echo "  task sync -- my-proj   rebase project branches"
+        echo "  task branch -- my-proj repo  adopt current worktree branch"
         echo "  task list              list projects"
         echo "  task doctor            check deps"
+        echo "  task repair -- my-proj repair project state"
         echo "  task install           install to \$GOPATH/bin"
         echo ""
         echo "Run CLI directly:"
@@ -85,6 +88,18 @@ tasks:
     cmds:
       - ./{{.BINARY}} drop {{.CLI_ARGS}}
 
+  sync:
+    desc: Rebase project branches onto origin bases
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} sync {{.CLI_ARGS}}
+
+  branch:
+    desc: Adopt a repository worktree's current branch
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} branch {{.CLI_ARGS}}
+
   list:
     desc: List worktree projects
     deps: [build]
@@ -102,6 +117,12 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY}} doctor
+
+  repair:
+    desc: Reconcile a project manifest and worktrees
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repair {{.CLI_ARGS}}
 
   cursor:
     desc: Open project in Cursor (picker if no name)

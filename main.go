@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/pershin-daniil/goworktree/internal/tui"
 )
@@ -23,17 +25,7 @@ const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		exitOnError(tui.RunShell(tui.ShellActions{
-			Start:  func() error { return runStart(nil) },
-			Add:    func() error { return runAdd(nil) },
-			Drop:   func() error { return runDrop(nil) },
-			List:   runList,
-			Cursor: func() error { return runCursor(nil) },
-			Goland: func() error { return runGoland(nil) },
-			Remove: func() error { return runRemove(nil) },
-			Doctor: runDoctor,
-			Config: runConfigShow,
-		}))
+		exitOnError(tui.RunApp(tui.AppActions{Version: version, Execute: runAppCommand}))
 		return
 	}
 
@@ -47,6 +39,10 @@ func main() {
 		err = runAdd(os.Args[2:])
 	case "drop":
 		err = runDrop(os.Args[2:])
+	case "sync":
+		err = runSync(os.Args[2:])
+	case "branch":
+		err = runBranch(os.Args[2:])
 	case "list", "ls":
 		err = runList()
 	case "remove", "rm":
@@ -59,10 +55,14 @@ func main() {
 		err = runOpen(os.Args[2:])
 	case "doctor":
 		err = runDoctor()
+	case "repair":
+		err = runRepair(os.Args[2:])
 	case "config":
 		err = runConfig(os.Args[2:])
 	case "repos":
 		err = runRepos(os.Args[2:])
+	case "programs":
+		err = runPrograms(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -78,6 +78,74 @@ func main() {
 	exitOnError(err)
 }
 
+func runPrograms(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: goworktree programs <list|add|update|delete|default|search>")
+	}
+	switch args[0] {
+	case "list":
+		return runProgramsList()
+	case "add":
+		if len(args) < 2 || flagValue(args, "--name") == "" || flagValue(args, "--path") == "" {
+			return fmt.Errorf("usage: goworktree programs add <id> --name NAME --path PATH [--args \"ARG …\"]")
+		}
+		return runProgramsAdd(args[1], flagValue(args, "--name"), flagValue(args, "--path"), flagValue(args, "--args"))
+	case "update":
+		if len(args) < 2 || (flagValue(args, "--name") == "" && flagValue(args, "--path") == "" && flagValue(args, "--enabled") == "" && !hasFlag(args, "--args")) {
+			return fmt.Errorf("usage: goworktree programs update <id> [--name NAME] [--path PATH] [--args \"ARG …\"] [--enabled=true|false]")
+		}
+		return runProgramsUpdate(args[1], flagValue(args, "--name"), flagValue(args, "--path"), flagValue(args, "--args"), hasFlag(args, "--args"), flagValue(args, "--enabled"))
+	case "delete":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: goworktree programs delete <id>")
+		}
+		return runProgramsDelete(args[1])
+	case "default":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: goworktree programs default <id>")
+		}
+		return runProgramsDefault(args[1])
+	case "search":
+		if len(args) > 2 {
+			return fmt.Errorf("usage: goworktree programs search [query]")
+		}
+		query := ""
+		if len(args) == 2 {
+			query = args[1]
+		}
+		return runProgramsSearch(query)
+	case "open":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: goworktree programs open <id> <project>")
+		}
+		return runProgramsOpen(args[1], args[2])
+	default:
+		return fmt.Errorf("unknown programs subcommand: %s", args[0])
+	}
+}
+
+func hasFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// runAppCommand executes an explicit CLI invocation while the root TUI owns
+// the terminal.  Capturing both streams prevents Git diagnostics from drawing
+// over Bubble Tea's alternate screen.
+func runAppCommand(args []string) (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(path, args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func runConfig(args []string) error {
 	if len(args) == 0 {
 		return runConfigShow()
@@ -88,7 +156,7 @@ func runConfig(args []string) error {
 	case "edit":
 		return runConfigEdit()
 	case "set":
-		if len(args) < 3 {
+		if len(args) != 3 {
 			return fmt.Errorf("usage: goworktree config set <key> <value>")
 		}
 		return runConfigSet(args[1], args[2])
@@ -134,22 +202,29 @@ func usage() {
 usage:
   goworktree                       interactive home menu
   goworktree init
-  goworktree start [name] [--open] create or resume project (branch = name)
-  goworktree add [project]         add repos to an existing project
-  goworktree drop [project] [-D]   remove repos from a project
+  goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
+  goworktree add <project> --repos id,id add repos to an existing project
+  goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
+  goworktree sync <project>        rebase project branches onto origin bases
+  goworktree branch <project> <repo> adopt a worktree's current branch
   goworktree list
-  goworktree remove [project] [-D] delete whole project group
-  goworktree cursor [project]
-  goworktree goland [project]
-  goworktree open [project]        alias for cursor
+  goworktree remove <project> [-D] [--yes] delete whole project group
+  goworktree cursor <project>
+  goworktree goland <project>
+  goworktree open <project>        open project in default program
   goworktree doctor
+  goworktree repair <project>     validate and reconcile project state
   goworktree config [show|edit|set <key> <value>]
   goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
+  goworktree programs <list|add|update|delete|default|search>
 
 notes:
-  pickers use vim keys (j/k, g/G, /, space, enter, esc)
+  without arguments, goworktree starts the unified interactive dashboard
+  explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
-  drop/remove -D deletes only LOCAL branches; remotes are untouched
+  repair preserves a corrupt manifest before rebuilding it from worktrees
+  remove -D fully clears project worktrees and LOCAL branches; remotes are untouched
+  drop -D deletes only LOCAL branches; remotes are untouched
   add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
 
 `, version)
