@@ -1,6 +1,6 @@
 # goworktree
 
-Personal CLI for **multi-repo git worktree project groups** — pick repos, create a shared branch worktree folder, open it in Cursor or GoLand.
+Personal CLI for **multi-repo git worktree project groups** — pick repos, create a shared branch worktree folder, and open it in any configured program.
 
 Running `goworktree` with no arguments opens one persistent dashboard: navigation, forms, confirmations, progress, and results stay inside the same terminal UI. A failed operation exposes `c` to copy a structured diagnostic report; it can include local paths and Git error text.
 
@@ -20,7 +20,7 @@ Or from a clone:
 task install   # or: go install .
 ```
 
-Requires: **Go 1.23+**, **git**, and optionally Cursor / GoLand.
+Requires: **Go 1.23+**, **git**, and optionally any program that can open a folder.
 
 ## Quickstart
 
@@ -52,7 +52,7 @@ task doctor
 4. **Manifest** — `.goworktree.json` in the project folder. It is atomically written after each repository step, so re-run `start` to **resume** pending/failed repos safely.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
 6. **`remove -D`** — fully delete a project group: its worktrees, local project branches, stale Git worktree registrations, and project folder. Remote branches are never touched.
-7. **`sync`** — fetch `origin` and rebase each project branch onto its configured base. Dirty files are auto-stashed and restored by immutable stash ID; a rebase or restore conflict rolls that repository back. Sync Git operations use a configurable timeout.
+7. **`sync`** — fetch `origin` and rebase each project branch onto its configured base. A clean-worktree rebase conflict is kept open, and the conflicting worktree opens in the default program. Resolve and stage it there, then press Enter in the dashboard to retry. Dirty files are auto-stashed and restored by immutable stash ID; conflicts involving that restore are rolled back safely. Sync Git operations use a configurable timeout.
 8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
 9. **`repair`** — validates a project, preserves and rebuilds a corrupt manifest when possible, marks missing worktrees for recreation, and prunes stale Git registrations.
 
@@ -69,7 +69,8 @@ task doctor
 | `branch <project> <repo>` | Adopt a repository worktree's current branch in the project manifest |
 | `list` / `ls` | List project groups |
 | `remove` / `rm` `<name> [-D] [--yes]` | Delete a project group |
-| `cursor` / `goland` / `open` | Open project in editor |
+| `cursor` / `goland` / `open` | Open project in a compatibility editor / the default program |
+| `programs list/add/update/delete/default/search` | Manage programs shown under Open with |
 | `doctor` | Check git, editors, config |
 | `repair <project>` | Reconcile a project manifest and worktrees after interruption or corruption |
 | `config show` / `edit` / `set <key> <value>` | Configuration |
@@ -88,14 +89,17 @@ task doctor
 | `Esc` / `q` | cancel / quit |
 | `Ctrl+C` | hard quit |
 
-The dashboard never drops to a console-only screen or asks for a continuation pause. On failure, press `c` to copy the diagnostic report and `Enter`/`Esc` to return to the dashboard.
+The dashboard never drops to a console-only screen or asks for a continuation pause. On failure, press `c` to copy the diagnostic report and `Enter`/`Esc` to return to the dashboard. After a sync conflict, resolve and stage the files in the program it opens, then press `Enter` to continue that rebase.
 
 ## Config sketch
 
 ```json
 {
-  "cursor_path": "cursor",
-  "goland_path": "goland",
+  "open_with": {
+    "cursor": {"name": "Cursor", "path": "cursor", "enabled": true},
+    "goland": {"name": "GoLand", "path": "goland", "enabled": true}
+  },
+  "default_program": "cursor",
   "repos_root": "/Users/you/Projects",
   "projects_root": "/Users/you/Projects/worktrees",
   "default_branch": "main",
@@ -111,10 +115,18 @@ The dashboard never drops to a console-only screen or asks for a continuation pa
 }
 ```
 
-Useful keys for `goworktree config set`:
+Use `goworktree programs` to manage the **Open with** registry:
 
-- `repos_root`, `projects_root`, `default_branch`, `scan_depth`, `command_timeout_seconds`
-- `cursor_path`, `goland_path`
+```bash
+goworktree programs list
+goworktree programs search code
+goworktree programs add vscode --name "VS Code" --path code
+goworktree programs update vscode --enabled=false
+goworktree programs default vscode
+goworktree programs delete vscode
+```
+
+`search` lists executable files from `PATH`; `add` and `update` require a runnable executable path or a command resolvable from `PATH`. Programs receive the project folder as their final argument. For macOS apps that need LaunchServices, use arguments, for example: `goworktree programs update codex-id-1 --path open --args "-a Codex"`.
 
 ## Development
 

@@ -217,29 +217,29 @@ func TestSyncWorktreeRebasesDivergedBranch(t *testing.T) {
 	}
 }
 
-func TestSyncWorktreeAbortsConflictingRebase(t *testing.T) {
+func TestSyncWorktreeLeavesConflictingRebaseForResolutionAndRetries(t *testing.T) {
 	_, seed, work := setupSyncRepos(t)
 	if err := os.WriteFile(filepath.Join(work, "shared.txt"), []byte("ticket change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitTestRun(t, work, "add", "shared.txt")
 	gitTestRun(t, work, "commit", "-m", "ticket change")
-	before := strings.TrimSpace(gitTestOutput(t, work, "rev-parse", "HEAD"))
 	writeCommitPush(t, seed, "shared.txt", "base change\n", "base change")
 
 	result := SyncWorktree(work, "ticket", "main")
-	if result.Status != SyncRolledBack || result.Err == nil {
+	if result.Status != SyncConflict || result.Err == nil {
 		t.Fatalf("SyncWorktree = %+v", result)
 	}
-	if strings.Contains(result.Err.Error(), "rebase --continue") || strings.Contains(result.Err.Error(), "Could not apply") {
-		t.Fatalf("rollback error contains stale conflict instructions: %v", result.Err)
+	if !strings.Contains(result.Err.Error(), "resolve") {
+		t.Fatalf("conflict error lacks resolution guidance: %v", result.Err)
 	}
-	after := strings.TrimSpace(gitTestOutput(t, work, "rev-parse", "HEAD"))
-	if after != before {
-		t.Fatalf("HEAD changed after rebase abort: %s -> %s", before, after)
+	if !rebaseInProgress(work) {
+		t.Fatal("rebase state was not retained for manual resolution")
 	}
-	if _, err := os.Stat(filepath.Join(work, ".git", "rebase-merge")); err == nil {
-		t.Fatal("rebase state left behind")
+	gitTestRun(t, work, "add", "shared.txt")
+	result = SyncWorktree(work, "ticket", "main")
+	if result.Status != SyncRebased || result.Err != nil {
+		t.Fatalf("SyncWorktree retry = %+v", result)
 	}
 }
 

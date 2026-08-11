@@ -21,6 +21,7 @@ type SyncStatus string
 const (
 	SyncRebased    SyncStatus = "rebased"
 	SyncUpToDate   SyncStatus = "up-to-date"
+	SyncConflict   SyncStatus = "conflict"
 	SyncRolledBack SyncStatus = "rolled-back"
 	SyncFailed     SyncStatus = "failed"
 )
@@ -265,7 +266,10 @@ func DeleteBranch(gitDir, branch string) error {
 
 // SyncWorktree fetches origin and rebases the checked-out project branch onto
 // origin/<base>. Local changes, including untracked files, are stashed and
-// restored around the operation. A failed rebase is aborted before returning.
+// restored around the operation. A rebase conflict in a clean worktree is
+// intentionally left in place so the caller can open the worktree for manual
+// resolution and retry this operation. Conflicts after auto-stashing are still
+// rolled back, because restoring that stash safely requires the original tree.
 func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 	return SyncWorktreeContext(context.Background(), repo, expectedBranch, base)
 }
@@ -276,6 +280,24 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	result := SyncResult{Status: SyncFailed}
 	if strings.TrimSpace(base) == "" {
 		result.Err = fmt.Errorf("base branch is empty")
+		return result
+	}
+	// During a rebase HEAD is detached, so this must run before normal branch
+	// validation. The expected branch was validated when the rebase began.
+	if rebaseInProgress(repo) {
+		if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
+			if rebaseInProgress(repo) {
+				result.Status = SyncConflict
+				result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry sync: %w", err)
+				return result
+			}
+			result.Err = fmt.Errorf("continue rebase: %w", err)
+			return result
+		}
+		result.Status = SyncRebased
+		if head, err := revision(repo, "HEAD"); err == nil {
+			result.To = head
+		}
 		return result
 	}
 	branch, err := CurrentBranch(repo)
@@ -352,6 +374,11 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	}
 
 	if _, err := runContext(ctx, repo, "rebase", target); err != nil {
+		if !stashed && rebaseInProgress(repo) {
+			result.Status = SyncConflict
+			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it, stage the files, then retry sync", target)
+			return result
+		}
 		_, _ = run(repo, "rebase", "--abort")
 		_, _ = run(repo, "reset", "--hard", from)
 		if restoreErr := restore(); restoreErr != nil {
@@ -384,6 +411,11 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", target, from)
 	result.To = from
 	return result
+}
+
+func rebaseInProgress(repo string) bool {
+	_, err := run(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD")
+	return err == nil
 }
 
 func shortRevision(revision string) string {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/pershin-daniil/goworktree/internal/tui"
 )
@@ -60,6 +61,8 @@ func main() {
 		err = runConfig(os.Args[2:])
 	case "repos":
 		err = runRepos(os.Args[2:])
+	case "programs":
+		err = runPrograms(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -73,6 +76,61 @@ func main() {
 	}
 
 	exitOnError(err)
+}
+
+func runPrograms(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: goworktree programs <list|add|update|delete|default|search>")
+	}
+	switch args[0] {
+	case "list":
+		return runProgramsList()
+	case "add":
+		if len(args) < 2 || flagValue(args, "--name") == "" || flagValue(args, "--path") == "" {
+			return fmt.Errorf("usage: goworktree programs add <id> --name NAME --path PATH [--args \"ARG …\"]")
+		}
+		return runProgramsAdd(args[1], flagValue(args, "--name"), flagValue(args, "--path"), flagValue(args, "--args"))
+	case "update":
+		if len(args) < 2 || (flagValue(args, "--name") == "" && flagValue(args, "--path") == "" && flagValue(args, "--enabled") == "" && !hasFlag(args, "--args")) {
+			return fmt.Errorf("usage: goworktree programs update <id> [--name NAME] [--path PATH] [--args \"ARG …\"] [--enabled=true|false]")
+		}
+		return runProgramsUpdate(args[1], flagValue(args, "--name"), flagValue(args, "--path"), flagValue(args, "--args"), hasFlag(args, "--args"), flagValue(args, "--enabled"))
+	case "delete":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: goworktree programs delete <id>")
+		}
+		return runProgramsDelete(args[1])
+	case "default":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: goworktree programs default <id>")
+		}
+		return runProgramsDefault(args[1])
+	case "search":
+		if len(args) > 2 {
+			return fmt.Errorf("usage: goworktree programs search [query]")
+		}
+		query := ""
+		if len(args) == 2 {
+			query = args[1]
+		}
+		return runProgramsSearch(query)
+	case "open":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: goworktree programs open <id> <project>")
+		}
+		return runProgramsOpen(args[1], args[2])
+	default:
+		return fmt.Errorf("unknown programs subcommand: %s", args[0])
+	}
+}
+
+func hasFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // runAppCommand executes an explicit CLI invocation while the root TUI owns
@@ -144,7 +202,7 @@ func usage() {
 usage:
   goworktree                       interactive home menu
   goworktree init
-  goworktree start <name> --repos id,id [--open] create or resume project
+  goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
   goworktree add <project> --repos id,id add repos to an existing project
   goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
   goworktree sync <project>        rebase project branches onto origin bases
@@ -153,11 +211,12 @@ usage:
   goworktree remove <project> [-D] [--yes] delete whole project group
   goworktree cursor <project>
   goworktree goland <project>
-  goworktree open [project]        alias for cursor
+  goworktree open <project>        open project in default program
   goworktree doctor
   goworktree repair <project>     validate and reconcile project state
   goworktree config [show|edit|set <key> <value>]
   goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
+  goworktree programs <list|add|update|delete|default|search>
 
 notes:
   without arguments, goworktree starts the unified interactive dashboard

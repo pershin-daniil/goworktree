@@ -7,6 +7,7 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"runtime"
 	"sort"
 	"strings"
@@ -36,6 +37,10 @@ const (
 	appRepositories
 	appPickRepos
 	appPickBranchRepo
+	appPickDefaultProgram
+	appPrograms
+	appProgramActions
+	appProgramForm
 	appInput
 	appSetup
 	appConfirm
@@ -48,6 +53,26 @@ type appItem struct{ id, title, desc string }
 func (i appItem) FilterValue() string { return i.title + " " + i.desc }
 func (i appItem) Title() string       { return i.title }
 func (i appItem) Description() string { return i.desc }
+
+// repoPickerDelegate renders the current multi-selection state. The standard
+// list delegate has no notion of checked items, which made Space appear to do
+// nothing in the repository picker.
+type repoPickerDelegate struct {
+	list.DefaultDelegate
+	selected map[string]bool
+}
+
+func (d repoPickerDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	if it, ok := item.(appItem); ok {
+		mark := "○ "
+		if d.selected[it.id] {
+			mark = "✓ "
+		}
+		it.title = mark + it.title
+		item = it
+	}
+	d.DefaultDelegate.Render(w, m, index, item)
+}
 
 type appDoneMsg struct {
 	output string
@@ -62,8 +87,10 @@ type appModel struct {
 	cfg           *config.Config
 	configErr     error
 	selected      string
+	programID     string
 	pendingAction string
 	pendingArgs   []string
+	confirmScreen appScreen
 	input         textinput.Model
 	setupInputs   []textinput.Model
 	setupFocus    int
@@ -99,7 +126,7 @@ func newAppModel(actions AppActions) appModel {
 }
 
 func (m *appModel) openSetup() {
-	values := []string{m.cfg.CursorPath, m.cfg.GolandPath, m.cfg.ReposRoot, m.cfg.ProjectsRoot, m.cfg.DefaultBranch}
+	values := []string{m.cfg.ReposRoot, m.cfg.ProjectsRoot, m.cfg.DefaultBranch}
 	m.setupInputs = make([]textinput.Model, len(values))
 	for i, value := range values {
 		input := textinput.New()
@@ -160,11 +187,17 @@ func (m *appModel) setProjectActions() {
 		appItem{"drop", "Drop repositories", "Remove worktrees from this project"},
 		appItem{"sync", "Sync project", "Fetch and rebase project branches"},
 		appItem{"branch", "Adopt branch", "Save a worktree's current branch"},
-		appItem{"cursor", "Open Cursor", "Open project folder in Cursor"},
-		appItem{"goland", "Open GoLand", "Open project folder in GoLand"},
+	}
+	if m.cfg != nil {
+		for _, id := range m.cfg.EnabledPrograms() {
+			p, _ := m.cfg.Program(id)
+			items = append(items, appItem{"open:" + id, "Open " + p.Name, "Open project folder in " + p.Name})
+		}
+	}
+	items = append(items,
 		appItem{"remove", "Remove project", "Delete worktrees and local branches"},
 		appItem{"back", "Back", "Return to projects"},
-	}
+	)
 	m.setList("project · "+m.selected, items)
 	m.screen = appProjectActions
 }
@@ -173,8 +206,8 @@ func (m *appModel) setSettings() {
 	items := []list.Item{appItem{"back", "Back", "Return to projects"}}
 	if m.cfg != nil {
 		items = append(items,
-			appItem{"cursor_path", "Cursor executable", m.cfg.CursorPath},
-			appItem{"goland_path", "GoLand executable", m.cfg.GolandPath},
+			appItem{"open_with", "Open with", fmt.Sprintf("%d configured programs", len(m.cfg.OpenWith))},
+			appItem{"default_program", "Default program", programLabel(m.cfg, m.cfg.DefaultProgram)},
 			appItem{"repos_root", "Repositories root", m.cfg.ReposRoot},
 			appItem{"projects_root", "Projects root", m.cfg.ProjectsRoot},
 			appItem{"default_branch", "Default branch", m.cfg.DefaultBranch},
@@ -183,6 +216,65 @@ func (m *appModel) setSettings() {
 	}
 	m.setList("settings", items)
 	m.screen = appSettings
+}
+
+func enabledLabel(enabled bool) string {
+	if enabled {
+		return "enabled · enter to disable"
+	}
+	return "disabled · enter to enable"
+}
+
+func programLabel(cfg *config.Config, program string) string {
+	if program == "" {
+		return "none enabled"
+	}
+	p, ok := cfg.Program(program)
+	if !ok {
+		return program
+	}
+	return p.Name
+}
+
+func (m *appModel) setDefaultProgramPicker() {
+	items := make([]list.Item, 0, len(m.cfg.OpenWith))
+	for _, id := range m.cfg.EnabledPrograms() {
+		p, _ := m.cfg.Program(id)
+		items = append(items, appItem{id, p.Name, p.Path})
+	}
+	m.setList("Default program", items)
+	m.screen = appPickDefaultProgram
+}
+
+func (m *appModel) setPrograms() {
+	items := []list.Item{appItem{"add", "Add program", "Add an executable to Open with"}, appItem{"default", "Choose default", "Select the default enabled program"}, appItem{"back", "Back", "Return to settings"}}
+	for _, id := range m.cfg.ProgramIDs() {
+		p, _ := m.cfg.Program(id)
+		state := "enabled"
+		if !p.Enabled {
+			state = "disabled"
+		}
+		if m.cfg.DefaultProgram == id {
+			state += " · default"
+		}
+		command := strings.TrimSpace(p.Path + " " + strings.Join(p.Args, " "))
+		items = append(items, appItem{"program:" + id, p.Name, id + " · " + command + " · " + state})
+	}
+	m.setList("Open with", items)
+	m.screen = appPrograms
+}
+
+func (m *appModel) setProgramActions() {
+	p, _ := m.cfg.Program(m.programID)
+	items := []list.Item{
+		appItem{"edit", "Edit", p.Name + " · " + strings.TrimSpace(p.Path+" "+strings.Join(p.Args, " "))},
+		appItem{"toggle", "Toggle enabled", enabledLabel(p.Enabled)},
+		appItem{"default", "Set default", "Use this program for open and conflicts"},
+		appItem{"delete", "Delete", "Remove this program"},
+		appItem{"back", "Back", "Return to Open with"},
+	}
+	m.setList("Open with · "+p.Name, items)
+	m.screen = appProgramActions
 }
 
 func (m *appModel) setRepositories() {
@@ -235,6 +327,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if msg.String() == "enter" && m.err != nil && len(m.pendingArgs) > 0 && m.pendingArgs[0] == "sync" && strings.Contains(m.output, "conflict") {
+				m.start(m.pendingArgs...)
+				return m, m.command()
+			}
 			if msg.String() == "enter" || msg.String() == "esc" || msg.String() == "q" {
 				m.setDashboard()
 				return m, nil
@@ -264,6 +360,41 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
+		if m.screen == appProgramForm {
+			switch msg.String() {
+			case "esc":
+				m.setPrograms()
+				return m, nil
+			case "tab", "down":
+				m.setupInputs[m.setupFocus].Blur()
+				m.setupFocus = (m.setupFocus + 1) % len(m.setupInputs)
+				m.setupInputs[m.setupFocus].Focus()
+				return m, textinput.Blink
+			case "shift+tab", "up":
+				m.setupInputs[m.setupFocus].Blur()
+				m.setupFocus = (m.setupFocus + len(m.setupInputs) - 1) % len(m.setupInputs)
+				m.setupInputs[m.setupFocus].Focus()
+				return m, textinput.Blink
+			case "enter":
+				if m.setupFocus < len(m.setupInputs)-1 {
+					m.setupInputs[m.setupFocus].Blur()
+					m.setupFocus++
+					m.setupInputs[m.setupFocus].Focus()
+					return m, textinput.Blink
+				}
+				var args []string
+				if m.pendingAction == "program-edit" {
+					args = []string{"programs", "update", m.programID, "--name", strings.TrimSpace(m.setupInputs[0].Value()), "--path", strings.TrimSpace(m.setupInputs[1].Value()), "--args", strings.TrimSpace(m.setupInputs[2].Value())}
+				} else {
+					args = []string{"programs", "add", strings.TrimSpace(m.setupInputs[0].Value()), "--name", strings.TrimSpace(m.setupInputs[1].Value()), "--path", strings.TrimSpace(m.setupInputs[2].Value()), "--args", strings.TrimSpace(m.setupInputs[3].Value())}
+				}
+				m.start(args...)
+				return m, m.command()
+			}
+			var cmd tea.Cmd
+			m.setupInputs[m.setupFocus], cmd = m.setupInputs[m.setupFocus].Update(msg)
+			return m, cmd
+		}
 		if m.screen == appSetup {
 			switch msg.String() {
 			case "ctrl+c":
@@ -285,11 +416,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setupInputs[m.setupFocus].Focus()
 					return m, textinput.Blink
 				}
-				m.cfg.CursorPath = strings.TrimSpace(m.setupInputs[0].Value())
-				m.cfg.GolandPath = strings.TrimSpace(m.setupInputs[1].Value())
-				m.cfg.ReposRoot = strings.TrimSpace(m.setupInputs[2].Value())
-				m.cfg.ProjectsRoot = strings.TrimSpace(m.setupInputs[3].Value())
-				m.cfg.DefaultBranch = strings.TrimSpace(m.setupInputs[4].Value())
+				m.cfg.ReposRoot = strings.TrimSpace(m.setupInputs[0].Value())
+				m.cfg.ProjectsRoot = strings.TrimSpace(m.setupInputs[1].Value())
+				m.cfg.DefaultBranch = strings.TrimSpace(m.setupInputs[2].Value())
 				if err := m.cfg.Save(); err != nil {
 					m.err = err
 					m.message = "setup failed"
@@ -309,7 +438,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.start(m.pendingArgs...)
 				return m, m.command()
 			case "n", "N", "esc", "q":
-				m.setProjectActions()
+				if m.confirmScreen == appPrograms {
+					m.setPrograms()
+				} else {
+					m.setProjectActions()
+				}
 				return m, nil
 			}
 		}
@@ -354,7 +487,24 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if (m.screen == appDashboard || m.screen == appProjectActions || m.screen == appSettings || m.screen == appRepositories) && m.list.FilterState() != list.Filtering {
+		if m.screen == appPickDefaultProgram && m.list.FilterState() != list.Filtering {
+			if msg.String() == "esc" || msg.String() == "q" {
+				m.setSettings()
+				return m, nil
+			}
+			if msg.String() == "enter" {
+				if it, ok := m.list.SelectedItem().(appItem); ok {
+					m.cfg.DefaultProgram = it.id
+					if err := m.cfg.Save(); err != nil {
+						m.err, m.message, m.screen = err, "could not save default program", appResult
+						return m, nil
+					}
+					m.setSettings()
+				}
+				return m, nil
+			}
+		}
+		if (m.screen == appDashboard || m.screen == appProjectActions || m.screen == appSettings || m.screen == appRepositories || m.screen == appPrograms || m.screen == appProgramActions) && m.list.FilterState() != list.Filtering {
 			if msg.String() == "esc" && m.screen == appProjectActions {
 				m.setDashboard()
 				return m, nil
@@ -365,6 +515,14 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.String() == "esc" && m.screen == appRepositories {
 				m.setDashboard()
+				return m, nil
+			}
+			if msg.String() == "esc" && m.screen == appPrograms {
+				m.setSettings()
+				return m, nil
+			}
+			if msg.String() == "esc" && m.screen == appProgramActions {
+				m.setPrograms()
 				return m, nil
 			}
 			if msg.String() == "q" && m.screen == appDashboard {
@@ -428,7 +586,58 @@ func (m *appModel) activate() tea.Cmd {
 			m.setDashboard()
 			return nil
 		}
+		if it.id == "default_program" {
+			if len(m.cfg.EnabledPrograms()) == 0 {
+				m.err, m.message, m.screen = fmt.Errorf("enable a program before choosing a default"), "no programs enabled", appResult
+				return nil
+			}
+			m.setDefaultProgramPicker()
+			return nil
+		}
+		if it.id == "open_with" {
+			m.setPrograms()
+			return nil
+		}
 		m.openInput("setting", "Set "+it.title, it.desc, []string{"config", "set", it.id})
+		return nil
+	}
+	if m.screen == appPrograms {
+		switch {
+		case it.id == "back":
+			m.setSettings()
+		case it.id == "add":
+			m.openProgramForm(false)
+		case it.id == "default":
+			m.setDefaultProgramPicker()
+		case strings.HasPrefix(it.id, "program:"):
+			m.programID = strings.TrimPrefix(it.id, "program:")
+			m.setProgramActions()
+		}
+		return nil
+	}
+	if m.screen == appProgramActions {
+		switch it.id {
+		case "back":
+			m.setPrograms()
+		case "edit":
+			m.openProgramForm(true)
+		case "toggle":
+			p, _ := m.cfg.Program(m.programID)
+			value := "false"
+			if !p.Enabled {
+				value = "true"
+			}
+			m.start("programs", "update", m.programID, "--enabled="+value)
+			return m.command()
+		case "default":
+			m.start("programs", "default", m.programID)
+			return m.command()
+		case "delete":
+			m.message = "Delete program " + m.programID + "?"
+			m.pendingArgs = []string{"programs", "delete", m.programID}
+			m.confirmScreen = appPrograms
+			m.screen = appConfirm
+		}
 		return nil
 	}
 	if m.screen == appRepositories {
@@ -456,15 +665,45 @@ func (m *appModel) activate() tea.Cmd {
 		return m.command()
 	case "branch":
 		m.prepareBranchPicker()
-	case "cursor", "goland":
-		m.start(it.id, m.selected)
-		return m.command()
-	case "remove":
-		m.message = "Remove project and all local project branches?"
-		m.pendingArgs = []string{"remove", m.selected, "-D", "--yes"}
-		m.screen = appConfirm
+	default:
+		if strings.HasPrefix(it.id, "open:") {
+			m.start("programs", "open", strings.TrimPrefix(it.id, "open:"), m.selected)
+			return m.command()
+		}
+		switch it.id {
+		case "remove":
+			m.message = "Remove project and all local project branches?"
+			m.pendingArgs = []string{"remove", m.selected, "-D", "--yes"}
+			m.confirmScreen = appProjectActions
+			m.screen = appConfirm
+		}
+		return nil
 	}
 	return nil
+}
+
+func (m *appModel) openProgramForm(edit bool) {
+	values := []string{"", "", "", ""}
+	if edit {
+		p, _ := m.cfg.Program(m.programID)
+		values = []string{p.Name, p.Path, strings.Join(p.Args, " ")}
+		m.pendingAction = "program-edit"
+	} else {
+		m.pendingAction = "program-add"
+	}
+	m.setupInputs = make([]textinput.Model, len(values))
+	for i, value := range values {
+		input := textinput.New()
+		input.SetValue(value)
+		input.Width = 56
+		input.Prompt = "› "
+		if i == 0 {
+			input.Focus()
+		}
+		m.setupInputs[i] = input
+	}
+	m.setupFocus = 0
+	m.screen = appProgramForm
 }
 
 func (m *appModel) openInput(action, title, placeholder string, args []string) {
@@ -506,6 +745,7 @@ func (m *appModel) prepareRepoPicker(action string) {
 		items = append(items, appItem{id, m.cfg.DisplayName(id), m.cfg.RepoBranch(id)})
 	}
 	m.setList(map[string]string{"start": "Select repositories", "add": "Add repositories", "drop": "Drop repositories"}[action], items)
+	m.list.SetDelegate(repoPickerDelegate{DefaultDelegate: list.NewDefaultDelegate(), selected: m.selectedRepos})
 	m.screen = appPickRepos
 }
 
@@ -544,7 +784,7 @@ func (m appModel) View() string {
 	case appInput:
 		return Box(Title(m.message) + "\n\n" + m.input.View() + "\n\n" + hintStyle.Render("enter save  esc cancel"))
 	case appSetup:
-		labels := []string{"Cursor executable", "GoLand executable", "Repositories root", "Projects root", "Default branch"}
+		labels := []string{"Repositories root", "Projects root", "Default branch"}
 		var body strings.Builder
 		body.WriteString(Title("goworktree setup"))
 		body.WriteString("\n\nConfigure paths and scan repositories.\n\n")
@@ -555,6 +795,22 @@ func (m appModel) View() string {
 			body.WriteString("\n\n")
 		}
 		body.WriteString(hintStyle.Render("tab navigate  enter next/save  ctrl+c quit"))
+		return Box(body.String())
+	case appProgramForm:
+		labels := []string{"ID", "Name", "Executable path", "Arguments (space-separated)"}
+		if m.pendingAction == "program-edit" {
+			labels = []string{"Name", "Executable path", "Arguments (space-separated)"}
+		}
+		var body strings.Builder
+		body.WriteString(Title("Open with · program"))
+		body.WriteString("\n\n")
+		for i, label := range labels {
+			body.WriteString(labelStyle.Render(label))
+			body.WriteString("\n")
+			body.WriteString(m.setupInputs[i].View())
+			body.WriteString("\n\n")
+		}
+		body.WriteString(hintStyle.Render("tab navigate  enter next/save  esc cancel"))
 		return Box(body.String())
 	case appConfirm:
 		return Box(Title("confirm") + "\n\n" + m.message + "\n\n" + hintStyle.Render("y/enter confirm  n/esc cancel"))
@@ -573,7 +829,11 @@ func (m appModel) View() string {
 			body += "\n\n" + hintStyle.Render(m.message)
 		}
 		if m.err != nil {
-			body += "\n\n" + hintStyle.Render("c copy diagnostic report  enter/esc dashboard")
+			hint := "c copy diagnostic report  enter/esc dashboard"
+			if len(m.pendingArgs) > 0 && m.pendingArgs[0] == "sync" && strings.Contains(m.output, "conflict") {
+				hint = "resolve in the opened program, then enter retry  esc dashboard  c copy diagnostic report"
+			}
+			body += "\n\n" + hintStyle.Render(hint)
 		} else {
 			body += "\n\n" + hintStyle.Render("enter/esc dashboard")
 		}

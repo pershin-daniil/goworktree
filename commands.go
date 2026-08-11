@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +14,7 @@ import (
 	"time"
 
 	"github.com/pershin-daniil/goworktree/internal/config"
-	"github.com/pershin-daniil/goworktree/internal/cursor"
 	"github.com/pershin-daniil/goworktree/internal/git"
-	"github.com/pershin-daniil/goworktree/internal/goland"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
 )
@@ -78,12 +77,12 @@ func runStart(args []string) error {
 		return err
 	}
 
-	openCursor := false
+	openDefault := false
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--open" {
-			openCursor = true
+			openDefault = true
 			continue
 		}
 		if isFlagWithValue(args, i, "--repos") {
@@ -127,8 +126,8 @@ func runStart(args []string) error {
 		pending := m.NeedsWork()
 		if len(pending) == 0 {
 			fmt.Printf("project %q already complete: %s\n", name, projectDir)
-			if openCursor {
-				return cursor.OpenFolder(cfg.CursorPath, projectDir)
+			if openDefault {
+				return openDefaultProgram(cfg, projectDir)
 			}
 			return nil
 		}
@@ -137,8 +136,8 @@ func runStart(args []string) error {
 		if err := runCreateTasks(projectDir, m, tasks); err != nil {
 			return err
 		}
-		if openCursor {
-			return cursor.OpenFolder(cfg.CursorPath, projectDir)
+		if openDefault {
+			return openDefaultProgram(cfg, projectDir)
 		}
 		fmt.Printf("\ndone: %s\n", projectDir)
 		return nil
@@ -193,8 +192,8 @@ func runStart(args []string) error {
 		return err
 	}
 
-	if openCursor {
-		if err := cursor.OpenFolder(cfg.CursorPath, projectDir); err != nil {
+	if openDefault {
+		if err := openDefaultProgram(cfg, projectDir); err != nil {
 			return err
 		}
 	}
@@ -535,6 +534,12 @@ func runSync(args []string) error {
 			fmt.Printf("  rebased      %s\n", folder)
 		case git.SyncUpToDate:
 			fmt.Printf("  up-to-date   %s\n", folder)
+		case git.SyncConflict:
+			failed = true
+			fmt.Printf("  conflict     %s: %v\n", folder, result.Err)
+			if err := openDefaultProgram(cfg, wtPath); err != nil {
+				fmt.Printf("  editor       %s: %v\n", folder, err)
+			}
 		case git.SyncRolledBack:
 			failed = true
 			fmt.Printf("  rolled-back  %s: %v\n", folder, result.Err)
@@ -544,11 +549,11 @@ func runSync(args []string) error {
 		}
 	}
 
-	fmt.Printf("\nsummary: %d rebased, %d up-to-date, %d rolled back, %d failed\n",
-		counts[git.SyncRebased], counts[git.SyncUpToDate], counts[git.SyncRolledBack],
-		counts[git.SyncFailed])
+	fmt.Printf("\nsummary: %d rebased, %d up-to-date, %d conflicts, %d rolled back, %d failed\n",
+		counts[git.SyncRebased], counts[git.SyncUpToDate], counts[git.SyncConflict],
+		counts[git.SyncRolledBack], counts[git.SyncFailed])
 	if failed {
-		return fmt.Errorf("one or more repositories could not be synchronized")
+		return fmt.Errorf("one or more repositories could not be synchronized; resolve conflicts and retry sync")
 	}
 	return nil
 }
@@ -657,7 +662,7 @@ func runCursor(args []string) error {
 	if err != nil {
 		return err
 	}
-	return cursor.OpenFolder(cfg.CursorPath, dir)
+	return openProgram(cfg, config.ProgramCursor, dir)
 }
 
 func runGoland(args []string) error {
@@ -678,11 +683,200 @@ func runGoland(args []string) error {
 	if err != nil {
 		return err
 	}
-	return goland.OpenFolder(cfg.GolandPath, dir)
+	return openProgram(cfg, config.ProgramGoland, dir)
 }
 
 func runOpen(args []string) error {
-	return runCursor(args)
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		return fmt.Errorf("usage: goworktree open <project>")
+	}
+	dir, err := project.Dir(cfg, args[0])
+	if err != nil {
+		return err
+	}
+	return openDefaultProgram(cfg, dir)
+}
+
+func runProgramsList() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	for _, id := range cfg.ProgramIDs() {
+		p, _ := cfg.Program(id)
+		state := "disabled"
+		if p.Enabled {
+			state = "enabled"
+		}
+		def := ""
+		if cfg.DefaultProgram == id {
+			def = " default"
+		}
+		fmt.Printf("%s\t%s\t%s\t%s%s\n", id, p.Name, strings.TrimSpace(p.Path+" "+strings.Join(p.Args, " ")), state, def)
+	}
+	return nil
+}
+
+func runProgramsAdd(id, name, path, args string) error {
+	if !config.ValidProgramID(id) {
+		return fmt.Errorf("invalid program id %q (use lowercase letters, digits, hyphens, or underscores)", id)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("program name is required")
+	}
+	if err := config.ValidateProgramPath(path); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if _, exists := cfg.Program(id); exists {
+		return fmt.Errorf("program %q already exists", id)
+	}
+	cfg.OpenWith[id] = config.Program{Name: strings.TrimSpace(name), Path: strings.TrimSpace(path), Args: strings.Fields(args), Enabled: true}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runProgramsUpdate(id, name, path, args string, setArgs bool, enabled string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	p, ok := cfg.Program(id)
+	if !ok {
+		return fmt.Errorf("program %q is not configured", id)
+	}
+	if name != "" {
+		p.Name = strings.TrimSpace(name)
+		if p.Name == "" {
+			return fmt.Errorf("program name is required")
+		}
+	}
+	if path != "" {
+		if err := config.ValidateProgramPath(path); err != nil {
+			return err
+		}
+		p.Path = strings.TrimSpace(path)
+	}
+	if setArgs {
+		p.Args = strings.Fields(args)
+	}
+	if enabled != "" {
+		v, err := strconv.ParseBool(enabled)
+		if err != nil {
+			return fmt.Errorf("enabled must be true or false")
+		}
+		p.Enabled = v
+	}
+	cfg.OpenWith[id] = p
+	return cfg.Save()
+}
+
+func runProgramsDelete(id string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Program(id); !ok {
+		return fmt.Errorf("program %q is not configured", id)
+	}
+	delete(cfg.OpenWith, id)
+	return cfg.Save()
+}
+
+func runProgramsDefault(id string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	p, ok := cfg.Program(id)
+	if !ok {
+		return fmt.Errorf("program %q is not configured", id)
+	}
+	if !p.Enabled {
+		return fmt.Errorf("program %q is disabled", id)
+	}
+	cfg.DefaultProgram = id
+	return cfg.Save()
+}
+
+func runProgramsOpen(id, name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	dir, err := project.Dir(cfg, name)
+	if err != nil {
+		return err
+	}
+	return openProgram(cfg, id, dir)
+}
+
+func runProgramsSearch(query string) error {
+	query = strings.ToLower(strings.TrimSpace(query))
+	seen := map[string]string{}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if _, exists := seen[name]; exists || (query != "" && !strings.Contains(strings.ToLower(name), query)) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+				continue
+			}
+			seen[name] = filepath.Join(dir, name)
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("%s\t%s\n", name, seen[name])
+	}
+	return nil
+}
+
+func openDefaultProgram(cfg *config.Config, dir string) error {
+	if cfg.DefaultProgram == "" {
+		return fmt.Errorf("no default program is enabled — add or enable one in Open with settings")
+	}
+	return openProgram(cfg, cfg.DefaultProgram, dir)
+}
+
+func openProgram(cfg *config.Config, id, dir string) error {
+	program, ok := cfg.Program(id)
+	if !ok {
+		return fmt.Errorf("open-with program %q is not configured", id)
+	}
+	if !program.Enabled {
+		return fmt.Errorf("open-with program %q is disabled", id)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	args := append(append([]string(nil), program.Args...), abs)
+	cmd := exec.Command(program.Path, args...)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open %s: %w", program.Name, err)
+	}
+	return nil
 }
 
 func runList() error {
@@ -785,7 +979,7 @@ func runDoctor() error {
 			fmt.Printf("  miss %-8s empty\n", label)
 			return
 		}
-		if _, err := os.Stat(p); err == nil || p == "cursor" || p == "goland" {
+		if _, err := os.Stat(p); err == nil {
 			fmt.Printf("  ok  %-8s %s\n", label, p)
 			return
 		}
@@ -795,8 +989,10 @@ func runDoctor() error {
 		}
 		fmt.Printf("  warn %-8s %s (not found)\n", label, p)
 	}
-	checkPath("cursor", cfg.CursorPath)
-	checkPath("goland", cfg.GolandPath)
+	for _, id := range cfg.ProgramIDs() {
+		p, _ := cfg.Program(id)
+		checkPath(id, p.Path)
+	}
 
 	if projects, err := project.List(cfg); err == nil {
 		fmt.Printf("  ok  groups   %d project(s)\n", len(projects))
@@ -849,10 +1045,11 @@ func runConfigSet(key, value string) error {
 	}
 
 	switch key {
-	case "cursor_path":
-		cfg.CursorPath = value
-	case "goland_path":
-		cfg.GolandPath = value
+	case "default_program":
+		if !cfg.ProgramEnabled(value) {
+			return fmt.Errorf("default_program %q is not enabled", value)
+		}
+		cfg.DefaultProgram = value
 	case "repos_root":
 		cfg.ReposRoot = value
 	case "projects_root":
