@@ -38,7 +38,8 @@ func TestPlannerBuildOnlineFromFetchedCommitWithoutWorkMutation(t *testing.T) {
 	}
 
 	plan, err := planner.Build(context.Background(), Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"api": {
 				SourcePath:     fixture.source,
@@ -88,7 +89,8 @@ func TestPlannerBuildOfflineDoesNotRequireRemoteOrLock(t *testing.T) {
 	mustMkdir(t, worksRoot)
 
 	plan, err := (Planner{Git: SystemGit{}}).Build(context.Background(), Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"service": {SourcePath: repo, Folder: "service", BasePreference: "main"},
 		},
@@ -120,7 +122,8 @@ func TestPlannerRejectsBranchCollisionBeforeOnlineFetch(t *testing.T) {
 		Locker: FileRepositoryLocker{Set: lockops.Set{Root: filepath.Join(t.TempDir(), "control")}},
 	}
 	_, err := planner.Build(context.Background(), Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"repo": {SourcePath: fixture.source, Folder: "repo", Remote: "origin", BasePreference: "main"},
 		},
@@ -138,7 +141,8 @@ func TestPlannerRejectsDuplicateGitIdentity(t *testing.T) {
 	worksRoot := filepath.Join(t.TempDir(), "works")
 	mustMkdir(t, worksRoot)
 	_, err := (Planner{Git: SystemGit{}}).Build(context.Background(), Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"one": {SourcePath: repo, Folder: "one", BasePreference: "main"},
 			"two": {SourcePath: repo, Folder: "two", BasePreference: "main"},
@@ -154,7 +158,8 @@ func TestPlannerAppliesGitBranchValidationWithoutNormalizingName(t *testing.T) {
 	worksRoot := filepath.Join(t.TempDir(), "works")
 	mustMkdir(t, worksRoot)
 	_, err := (Planner{Git: SystemGit{}}).Build(context.Background(), Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"repo": {SourcePath: repo, Folder: "repo", BasePreference: "main"},
 		},
@@ -171,12 +176,41 @@ func TestPlannerClassifiesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := (Planner{Git: SystemGit{}}).Build(ctx, Catalog{
-		WorksRoot: worksRoot,
+		WorksRoot:   worksRoot,
+		ControlRoot: t.TempDir(),
 		Repositories: map[string]Repository{
 			"repo": {SourcePath: repo, Folder: "repo", BasePreference: "main"},
 		},
 	}, Request{Name: "work-1", RepositoryIDs: []string{"repo"}, Mode: ModeOffline})
 	assertProblemCode(t, err, CodeInterrupted)
+}
+
+func TestPlannerRoutesExistingOperationToResumeBeforeGitPreparation(t *testing.T) {
+	t.Parallel()
+
+	repo := newLocalRepository(t, false)
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	mustMkdir(t, worksRoot)
+	controlRoot := t.TempDir()
+	planner := Planner{Git: SystemGit{}}
+	catalog := Catalog{
+		WorksRoot:   worksRoot,
+		ControlRoot: controlRoot,
+		Repositories: map[string]Repository{
+			"repo": {SourcePath: repo, Folder: "repo", BasePreference: "main"},
+		},
+	}
+	request := Request{Name: "work-existing-op", RepositoryIDs: []string{"repo"}, Mode: ModeOffline}
+	plan, err := planner.Build(context.Background(), catalog, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := newOperationRecord(plan, strings.Repeat("c", 32), time.Date(2026, 8, 13, 17, 0, 0, 0, time.UTC))
+	if err := (OperationStore{}).Create(record); err != nil {
+		t.Fatal(err)
+	}
+	_, err = planner.Build(context.Background(), catalog, request)
+	assertProblemCode(t, err, CodeAlreadyExists)
 }
 
 func assertProblemCode(t *testing.T, err error, code ErrorCode) {

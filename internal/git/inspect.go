@@ -40,6 +40,13 @@ type WorktreeRegistration struct {
 	Prunable bool
 }
 
+type Checkout struct {
+	Identity RepositoryIdentity
+	FullRef  string
+	HeadOID  string
+	Detached bool
+}
+
 func ValidateBranchNameContext(ctx context.Context, repo, name string) error {
 	if name == "" {
 		return fmt.Errorf("branch name is empty")
@@ -221,6 +228,73 @@ func RootFileAtCommitContext(ctx context.Context, repo, oid, name string) (bool,
 		}
 	}
 	return false, nil
+}
+
+func CommitExistsContext(ctx context.Context, repo, oid string) error {
+	if strings.TrimSpace(oid) == "" {
+		return fmt.Errorf("commit OID is empty")
+	}
+	_, err := runContext(ctx, repo, "cat-file", "-e", oid+"^{commit}")
+	return err
+}
+
+// CreateWorktreeAtOIDContext creates exactly one new local branch and linked
+// worktree from an immutable commit. It never resolves or updates a remote ref.
+func CreateWorktreeAtOIDContext(ctx context.Context, repo, destination, branchRef, oid string) error {
+	branch, err := localBranchName(branchRef)
+	if err != nil {
+		return err
+	}
+	_, err = runContext(ctx, repo, "worktree", "add", "-b", branch, destination, oid)
+	return err
+}
+
+// AttachWorktreeContext attaches an already existing planned local branch.
+// It is used only when reconciliation proves that branch was created at the
+// exact planned OID by an interrupted New Work step.
+func AttachWorktreeContext(ctx context.Context, repo, destination, branchRef string) error {
+	branch, err := localBranchName(branchRef)
+	if err != nil {
+		return err
+	}
+	_, err = runContext(ctx, repo, "worktree", "add", destination, branch)
+	return err
+}
+
+func InspectCheckoutContext(ctx context.Context, path string) (Checkout, error) {
+	identity, err := InspectRepositoryContext(ctx, path)
+	if err != nil {
+		return Checkout{}, err
+	}
+	head, err := runContext(ctx, identity.SourcePath, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return Checkout{}, err
+	}
+	checkout := Checkout{Identity: identity, HeadOID: strings.TrimSpace(head)}
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "HEAD")
+	cmd.Dir = identity.SourcePath
+	out, err := cmd.Output()
+	if err == nil {
+		checkout.FullRef = strings.TrimSpace(string(out))
+		return checkout, nil
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return Checkout{}, fmt.Errorf("git symbolic-ref --quiet HEAD: %w", contextErr)
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		checkout.Detached = true
+		return checkout, nil
+	}
+	return Checkout{}, fmt.Errorf("git symbolic-ref --quiet HEAD: %w", err)
+}
+
+func localBranchName(fullRef string) (string, error) {
+	branch, ok := strings.CutPrefix(fullRef, "refs/heads/")
+	if !ok || branch == "" {
+		return "", fmt.Errorf("not a full local branch ref: %q", fullRef)
+	}
+	return branch, nil
 }
 
 func resolveNamedBase(ctx context.Context, repo, remote, name string, source BaseSource) (ResolvedBase, bool, error) {

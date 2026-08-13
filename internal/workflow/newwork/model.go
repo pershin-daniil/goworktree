@@ -16,15 +16,16 @@ const (
 )
 
 type Request struct {
-	Name          string
-	RepositoryIDs []string
-	BaseOverrides map[string]string
-	Mode          Mode
-	OpenProgram   string
+	Name          string            `json:"name"`
+	RepositoryIDs []string          `json:"repository_ids"`
+	BaseOverrides map[string]string `json:"base_overrides,omitempty"`
+	Mode          Mode              `json:"mode"`
+	OpenProgram   string            `json:"open_program,omitempty"`
 }
 
 type Catalog struct {
 	WorksRoot    string
+	ControlRoot  string
 	Repositories map[string]Repository
 }
 
@@ -37,26 +38,28 @@ type Repository struct {
 }
 
 type Plan struct {
-	WorkName         work.Name
-	WorkRoot         string
-	ManifestPath     string
-	Mode             Mode
-	OpenProgram      string
-	Repositories     []RepositoryPlan
-	NoRemoteMutation bool
+	WorkName            work.Name        `json:"work_name"`
+	WorkID              work.Identity    `json:"work_id"`
+	WorkRoot            string           `json:"work_root"`
+	ManifestPath        string           `json:"manifest_path"`
+	OperationRecordPath string           `json:"operation_record_path"`
+	Mode                Mode             `json:"mode"`
+	OpenProgram         string           `json:"open_program,omitempty"`
+	Repositories        []RepositoryPlan `json:"repositories"`
+	NoRemoteMutation    bool             `json:"no_remote_mutation"`
 }
 
 type RepositoryPlan struct {
-	ID              string
-	SourcePath      string
-	GitCommonDir    string
-	Remote          string
-	FetchedAt       *time.Time
-	BaseRef         string
-	BaseOID         string
-	TargetBranchRef string
-	Destination     string
-	IncludeInGoWork bool
+	ID              string     `json:"id"`
+	SourcePath      string     `json:"source_path"`
+	GitCommonDir    string     `json:"git_common_dir"`
+	Remote          string     `json:"remote,omitempty"`
+	FetchedAt       *time.Time `json:"fetched_at,omitempty"`
+	BaseRef         string     `json:"base_ref"`
+	BaseOID         string     `json:"base_oid"`
+	TargetBranchRef string     `json:"target_branch_ref"`
+	Destination     string     `json:"destination"`
+	IncludeInGoWork bool       `json:"include_in_go_work"`
 }
 
 type ErrorCode string
@@ -69,6 +72,7 @@ const (
 	CodeLocked          ErrorCode = "locked"
 	CodeExternalFailure ErrorCode = "external-failure"
 	CodeStateConflict   ErrorCode = "state-conflict"
+	CodeInvalidState    ErrorCode = "invalid-state"
 	CodeTimeout         ErrorCode = "timeout"
 	CodeInterrupted     ErrorCode = "interrupted"
 	CodeInternal        ErrorCode = "internal"

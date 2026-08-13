@@ -109,6 +109,13 @@ func (p Planner) Build(ctx context.Context, catalog Catalog, request Request) (P
 	if err != nil {
 		return Plan{}, problems(Problem{Code: CodeUnsafePath, Operation: "inspect-works-root", Path: catalog.WorksRoot, Cause: err})
 	}
+	controlRoot, err := canonicalDirectory(catalog.ControlRoot)
+	if err != nil {
+		return Plan{}, problems(Problem{Code: CodeUnsafePath, Operation: "inspect-control-root", Path: catalog.ControlRoot, Cause: err})
+	}
+	if withinPath(worksRoot, controlRoot) || withinPath(controlRoot, worksRoot) {
+		return Plan{}, problems(Problem{Code: CodeUnsafePath, Operation: "separate-control-root", Path: controlRoot, Cause: fmt.Errorf("control root and works root must not contain each other")})
+	}
 	workRoot, err := safeChild(worksRoot, name.String())
 	if err != nil {
 		return Plan{}, problems(Problem{Code: CodeUnsafePath, Operation: "resolve-work-root", Path: catalog.WorksRoot, Cause: err})
@@ -117,6 +124,13 @@ func (p Planner) Build(ctx context.Context, catalog Catalog, request Request) (P
 		return Plan{}, problems(Problem{Code: CodeInternal, Operation: "inspect-work-root", Path: workRoot, Cause: err})
 	} else if collision != "" {
 		return Plan{}, problems(Problem{Code: CodeAlreadyExists, Operation: "inspect-work-root", Path: filepath.Join(worksRoot, collision), Cause: fmt.Errorf("entry is case-equivalent to Work name %q", name)})
+	}
+	workID := work.NewIdentity(worksRoot, name)
+	operationRecordPath := filepath.Join(controlRoot, "operations", "new-work", workID.String()+".json")
+	if _, err := os.Lstat(operationRecordPath); err == nil {
+		return Plan{}, problems(Problem{Code: CodeAlreadyExists, Operation: "inspect-operation-record", Path: operationRecordPath, Cause: fmt.Errorf("New Work operation already exists; Resume it")})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Plan{}, problems(Problem{Code: CodeInternal, Operation: "inspect-operation-record", Path: operationRecordPath, Cause: err})
 	}
 
 	selected, selectProblems := selectRepositories(catalog, request, workRoot)
@@ -191,13 +205,15 @@ func (p Planner) Build(ctx context.Context, catalog Catalog, request Request) (P
 	}
 
 	plan := Plan{
-		WorkName:         name,
-		WorkRoot:         workRoot,
-		ManifestPath:     filepath.Join(workRoot, ".goworktree.json"),
-		Mode:             mode,
-		OpenProgram:      request.OpenProgram,
-		NoRemoteMutation: true,
-		Repositories:     make([]RepositoryPlan, 0, len(inspected)),
+		WorkName:            name,
+		WorkID:              workID,
+		WorkRoot:            workRoot,
+		ManifestPath:        filepath.Join(workRoot, ".goworktree.json"),
+		OperationRecordPath: operationRecordPath,
+		Mode:                mode,
+		OpenProgram:         request.OpenProgram,
+		NoRemoteMutation:    true,
+		Repositories:        make([]RepositoryPlan, 0, len(inspected)),
 	}
 	for _, repo := range inspected {
 		plan.Repositories = append(plan.Repositories, RepositoryPlan{

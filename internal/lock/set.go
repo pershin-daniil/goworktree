@@ -70,31 +70,29 @@ func (s Set) Acquire(ctx context.Context, namespace string, keys []string) (*Lea
 	}
 
 	lease := &Lease{}
+	rollback := func(primary error) error {
+		return errors.Join(primary, lease.Release())
+	}
 	for _, key := range ordered {
 		if err := ctx.Err(); err != nil {
-			_ = lease.Release()
-			return nil, err
+			return nil, rollback(err)
 		}
 		token, err := s.token()
 		if err != nil {
-			_ = lease.Release()
-			return nil, fmt.Errorf("generate lock token: %w", err)
+			return nil, rollback(fmt.Errorf("generate lock token: %w", err))
 		}
 		rec := record{Key: key, Token: token, PID: s.pid(), CreatedAt: s.now().UTC()}
 		data, err := json.Marshal(rec)
 		if err != nil {
-			_ = lease.Release()
-			return nil, err
+			return nil, rollback(err)
 		}
 		path := filepath.Join(dir, hashKey(key)+".lock")
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, os.ErrExist) {
-			_ = lease.Release()
-			return nil, fmt.Errorf("%w: %s", ErrLocked, key)
+			return nil, rollback(fmt.Errorf("%w: %s", ErrLocked, key))
 		}
 		if err != nil {
-			_ = lease.Release()
-			return nil, fmt.Errorf("acquire lock %q: %w", key, err)
+			return nil, rollback(fmt.Errorf("acquire lock %q: %w", key, err))
 		}
 		writeErr := func() error {
 			if _, err := file.Write(data); err != nil {
@@ -104,9 +102,8 @@ func (s Set) Acquire(ctx context.Context, namespace string, keys []string) (*Lea
 		}()
 		closeErr := file.Close()
 		if writeErr != nil || closeErr != nil {
-			_ = os.Remove(path)
-			_ = lease.Release()
-			return nil, fmt.Errorf("persist lock %q: %w", key, errors.Join(writeErr, closeErr))
+			removeErr := os.Remove(path)
+			return nil, rollback(fmt.Errorf("persist lock %q: %w", key, errors.Join(writeErr, closeErr, removeErr)))
 		}
 		lease.held = append(lease.held, held{path: path, token: token})
 	}

@@ -12,8 +12,13 @@ func CatalogFromConfig(cfg *config.Config, selectedIDs []string) (Catalog, error
 	if cfg == nil {
 		return Catalog{}, fmt.Errorf("config is nil")
 	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return Catalog{}, fmt.Errorf("resolve control root: %w", err)
+	}
 	catalog := Catalog{
 		WorksRoot:    cfg.ProjectsRoot,
+		ControlRoot:  controlRoot,
 		Repositories: make(map[string]Repository, len(selectedIDs)),
 	}
 	for _, id := range selectedIDs {

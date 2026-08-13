@@ -163,6 +163,20 @@ The application keeps separate kinds of information:
 Observed state wins when it conflicts with a stale status. The application
 does not repair the conflict by guessing user intent.
 
+### Version-1 New Work persistence
+
+New Work derives an opaque Work ID from the canonical works root and exact Work
+name. Its schema-versioned manifest lives inside the Work; its external
+operation record lives under
+`<control-root>/operations/new-work/<work-id>.json`. The two records share the
+same Work and operation IDs.
+
+Persistent JSON files are published atomically after file sync and followed by
+parent-directory sync. Initial creation is exclusive. Existing symlinks and
+non-regular metadata files are not followed or replaced. A completed New Work
+record is retained in phase `created` until a separate retention/archive policy
+is defined.
+
 ## User-visible state
 
 There is no aggregate `ready`, `current`, or `done` status.
@@ -661,16 +675,26 @@ Minimum matrix:
 
 Snapshot testing of human-readable output alone is insufficient.
 
+## Fixed harness decisions
+
+For initial New Work generation:
+
+- `go.work` uses the maximum root-module `go` directive, with minimum `1.23`;
+- included repositories are ordered by stable repository ID;
+- only root `go.mod` files participate;
+- generation is independent of the installed host Go version;
+- no `go.work` is created when there are no root modules.
+
 ## Open decisions
 
-1. Exact `go` directive and stable entry-ordering rules for generated `go.work`.
-2. Whether `go.work.sum` is managed, preserved, or removed with Work harness.
-3. Exact persisted schema and migration from the current project terminology.
-4. Storage format and durability level of operation records.
-5. Lock implementation and cross-platform repository identity rules.
-6. Cancellation behavior for each class of Git subprocess.
-7. Exact Rename Work ordering and rollback semantics for directory, local
+1. Whether `go.work.sum` is managed, preserved, or removed with Work harness.
+2. Migration from the current project manifest to the version-1 Work manifest.
+3. Retention and archive policy for completed operation records.
+4. Cross-platform repository identity and filesystem durability fallbacks where
+   hard links or directory sync are unavailable.
+5. Cancellation behavior for each class of Git subprocess.
+6. Exact Rename Work ordering and rollback semantics for directory, local
    branches, worktree registrations, and interruption.
-8. Stable machine-readable result and error schemas.
-9. Whether future managed `AGENTS.md` or `Taskfile.yml` files are templates,
+7. Stable machine-readable result and error schemas beyond New Work version 1.
+8. Whether future managed `AGENTS.md` or `Taskfile.yml` files are templates,
    generated artifacts, or user-owned files after creation.

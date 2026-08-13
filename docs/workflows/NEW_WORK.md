@@ -1,6 +1,6 @@
 # New Work workflow
 
-Status: draft 0.1
+Status: draft 0.2
 
 Parent specification: [../WORKFLOWS.md](../WORKFLOWS.md).
 
@@ -136,6 +136,8 @@ The plan contains:
 ### Work-level fields
 
 - Work name;
+- stable Work identity: SHA-256 of the canonical works-root path, one NUL byte,
+  and the exact Work name;
 - Work root;
 - mode: online or offline;
 - selected program, if automatic opening was requested;
@@ -172,6 +174,38 @@ Work path, destination, repository identity, local target ref, or selected base
 OID no longer matches.
 
 An invalidated plan returns `state-conflict`; no Work mutation begins.
+
+## Persistent identity and recovery files
+
+New Work uses versioned JSON records:
+
+- manifest schema version `1` at `<work-root>/.goworktree.json`;
+- operation schema version `1` at
+  `<control-root>/operations/new-work/<work-id>.json`.
+
+The manifest binds the Work ID, exact Work name, New Work operation ID,
+repository intent, immutable initial base OIDs, local branch refs, destinations,
+and harness membership. It does not treat a stored repository status as an
+observed Git fact.
+
+The operation record contains the immutable typed plan, phase, per-repository
+intent/verified checkpoints, harness checkpoint, timestamps, and last
+structured problem. When a manifest exists, its Work ID and operation ID must
+match before Resume may mutate Work or repository state. If interruption
+occurred before manifest publication, the external operation record may create
+the absent Work root or complete an otherwise empty recorded Work root, then
+publish the manifest.
+
+Initial JSON creation is exclusive and atomic. Replacement writes are
+same-directory atomic replacements. File data is synced before publication and
+the parent directory is synced after publication. Symlink and non-regular-file
+targets are rejected. Cooperative lock files are external to Work directories
+and are never removed merely because they appear stale.
+
+Atomic writers reserve hidden temporary names beginning with
+`.<target-basename>-` while an operation is incomplete. Resume may remove only
+regular files with that exact reserved prefix after acquiring the owning locks;
+other unexpected entries still block recovery.
 
 ## Operation phases
 
@@ -221,7 +255,8 @@ For every selected repository in stable plan order:
    - Git common-directory identity matches the planned source repository;
    - checked-out full ref equals `refs/heads/<work-name>`;
    - HEAD initially equals the planned base OID.
-5. Checkpoint the observed result in the operation record and manifest.
+5. Checkpoint the observed result in the operation record. The manifest remains
+   composition intent rather than an execution-status journal.
 
 The source checkout's current branch and local changes must remain unchanged.
 
@@ -239,8 +274,17 @@ After repository worktrees are verified:
 If no selected worktree has a root `go.mod`, no `go.work` is generated and the
 result states that explicitly.
 
-The exact `go` directive, entry ordering, and `go.work.sum` ownership remain
-defined by the parent document's open decisions.
+The generated file is deterministic:
+
+- the `go` directive is the maximum valid `go` directive found in the included
+  root `go.mod` files, with a minimum of `1.23`;
+- missing module `go` directives contribute `1.23`;
+- `use` entries follow stable repository-ID plan order;
+- paths are relative to the Work root and use slash separators;
+- block form is used even for one entry;
+- the installed host Go version is not an input.
+
+`go.work.sum` ownership remains an open decision. New Work does not generate it.
 
 ### 4. Verify Work
 
@@ -252,8 +296,10 @@ Final inspection verifies:
 - generated harness contents when applicable;
 - no unfinished repository creation step.
 
-Only then is New Work successful and its creation operation record cleared or
-archived according to the future storage contract.
+Only then is New Work successful. The version-1 implementation retains the
+operation record in phase `created`; later Resume calls still inspect current
+manifest, worktree identity, registration, and branch facts instead of trusting
+that phase alone. Archive/retention policy remains a separate decision.
 
 ### 5. Open after creation
 
