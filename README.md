@@ -37,7 +37,7 @@ goworktree init                 # TUI: paths + scan repos_root
 goworktree                      # Works dashboard, New Work, and scoped actions
 goworktree start EVOVPC-2855 --repos api,web # create / resume project group
 goworktree list
-goworktree sync EVOVPC-2855     # rebase project branches onto origin bases
+goworktree sync EVOVPC-2855     # plan fetched base OIDs, then rebase Work branches
 goworktree cursor EVOVPC-2855   # open a project in Cursor
 ```
 
@@ -60,7 +60,7 @@ task doctor
 4. **Manifest** — `.goworktree.json` in the project folder. It is atomically written after each repository step, so re-run `start` to **resume** pending/failed repos safely.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
 6. **`remove`** — show exact local deletion targets and require the case-sensitive Work name. After confirmation it writes an external recovery record, removes managed worktrees, compare-and-deletes confirmed local branch OIDs, then removes the confirmed Work root. Remote and remote-tracking refs are never deletion targets.
-7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked.
+7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked. An external checkpoint owns an unfinished rebase, so resolving/staging its conflict and repeating Sync continues only that recorded operation.
 8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
 9. **`repair`** — plans only deterministic repairs: reattach a missing checkout from its exact existing local branch, repair a proven checkout registration, regenerate a missing `go.work`, or reconstruct a missing completed New Work record from a valid manifest. Ambiguous branch, OID, repository-identity, or corrupt-manifest states are reported without mutation.
 

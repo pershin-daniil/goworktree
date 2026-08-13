@@ -620,6 +620,9 @@ func formatSyncWorkPlan(plan syncwork.Plan) string {
 	}
 	for _, repository := range plan.Repos {
 		status := string(repository.Relation)
+		if repository.Recovery {
+			status = "continue recorded rebase after staged conflict resolution"
+		}
 		if repository.BlockedReason != "" {
 			status = "blocked: " + repository.BlockedReason
 		}

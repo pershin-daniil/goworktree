@@ -78,7 +78,7 @@ tasks:
       - ./{{.BINARY}} drop {{.CLI_ARGS}}
 
   sync:
-    desc: Rebase project branches onto origin bases
+    desc: Run typed Sync Work against fetched immutable base OIDs
     deps: [build]
     cmds:
       - ./{{.BINARY}} sync {{.CLI_ARGS}}
@@ -96,7 +96,7 @@ tasks:
       - ./{{.BINARY}} list
 
   remove:
-    desc: Remove a worktree project group (picker if no name)
+    desc: Run typed Remove Work (--confirm must equal the exact Work name)
     deps: [build]
     cmds:
       - ./{{.BINARY}} remove {{.CLI_ARGS}}
@@ -108,7 +108,7 @@ tasks:
       - ./{{.BINARY}} doctor
 
   repair:
-    desc: Reconcile a project manifest and worktrees
+    desc: Apply deterministic typed Repair Work actions
     deps: [build]
     cmds:
       - ./{{.BINARY}} repair {{.CLI_ARGS}}

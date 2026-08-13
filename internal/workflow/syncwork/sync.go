@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
+	"github.com/pershin-daniil/goworktree/internal/work"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 )
 
@@ -37,14 +40,16 @@ type RepositoryPlan struct {
 	Relation                                  Relation
 	WorkingTree                               gitops.WorkingTreeStatus
 	BlockedReason                             string
+	Recovery                                  bool
 }
 
 type Plan struct {
-	WorkName string
-	WorkID   string
-	WorkRoot string
-	BuiltAt  time.Time
-	Repos    []RepositoryPlan
+	WorkName        string
+	WorkID          string
+	WorkRoot        string
+	BuiltAt         time.Time
+	OperationRecord string
+	Repos           []RepositoryPlan
 }
 
 type RepositoryResult struct {
@@ -77,6 +82,7 @@ type Git interface {
 	WorkingTreeStatus(context.Context, string) (gitops.WorkingTreeStatus, error)
 	ActiveOperations(context.Context, string) ([]gitops.ActiveOperation, error)
 	RebaseToOID(context.Context, string, string, string) gitops.SyncResult
+	ContinueRebase(context.Context, string, string, string) gitops.SyncResult
 }
 
 type SystemGit struct{}
@@ -102,15 +108,24 @@ func (SystemGit) ActiveOperations(ctx context.Context, path string) ([]gitops.Ac
 func (SystemGit) RebaseToOID(ctx context.Context, path, branch, oid string) gitops.SyncResult {
 	return gitops.RebaseWorktreeToOIDContext(ctx, path, branch, oid)
 }
+func (SystemGit) ContinueRebase(ctx context.Context, path, branch, oid string) gitops.SyncResult {
+	return gitops.ContinueRebaseContext(ctx, path, branch, oid)
+}
 
 type Planner struct {
 	Git Git
 	Now func() time.Time
 }
 
-func (p Planner) Build(ctx context.Context, snapshot inspectwork.Snapshot, configs []RepositoryConfig) (Plan, error) {
+func (p Planner) Build(ctx context.Context, snapshot inspectwork.Snapshot, controlRoot string, configs []RepositoryConfig) (Plan, error) {
 	if p.Git == nil {
 		return Plan{}, fmt.Errorf("Sync Work Git adapter is nil")
+	}
+	operationPath := filepath.Join(controlRoot, "operations", "sync-work", snapshot.WorkID.String()+".json")
+	if recovered, ok, err := interruptedPlan(operationPath, snapshot.WorkID.String()); err != nil {
+		return Plan{}, err
+	} else if ok {
+		return recovered, nil
 	}
 	if snapshot.Manifest.Value == nil || snapshot.Manifest.State != inspectwork.MetadataValid {
 		return Plan{}, fmt.Errorf("Work manifest is not valid; run Repair Work")
@@ -119,7 +134,10 @@ func (p Planner) Build(ctx context.Context, snapshot inspectwork.Snapshot, confi
 	for _, config := range configs {
 		configByID[config.ID] = config
 	}
-	plan := Plan{WorkName: snapshot.WorkName.String(), WorkID: snapshot.WorkID.String(), WorkRoot: snapshot.WorkRoot, BuiltAt: p.now().UTC()}
+	plan := Plan{
+		WorkName: snapshot.WorkName.String(), WorkID: snapshot.WorkID.String(), WorkRoot: snapshot.WorkRoot,
+		BuiltAt: p.now().UTC(), OperationRecord: operationPath,
+	}
 	for _, observed := range snapshot.Repositories {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
@@ -201,6 +219,55 @@ func (p Planner) now() time.Time {
 	return time.Now()
 }
 
+type checkpoint struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+type operationRecord struct {
+	SchemaVersion int          `json:"schema_version"`
+	Kind          string       `json:"kind"`
+	Plan          Plan         `json:"plan"`
+	Repositories  []checkpoint `json:"repositories"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
+func interruptedPlan(path, workID string) (Plan, bool, error) {
+	var record operationRecord
+	if err := work.LoadJSON(path, &record); errors.Is(err, os.ErrNotExist) {
+		return Plan{}, false, nil
+	} else if err != nil {
+		return Plan{}, false, fmt.Errorf("read Sync Work operation: %w", err)
+	}
+	if err := validateRecord(record, workID); err != nil {
+		return Plan{}, false, err
+	}
+	recovered := record.Plan
+	found := false
+	for index := range record.Repositories {
+		if record.Repositories[index].Status == string(gitops.SyncConflict) || record.Repositories[index].Status == "rebasing" {
+			recovered.Repos[index].Recovery = true
+			found = true
+		}
+	}
+	return recovered, found, nil
+}
+
+func validateRecord(record operationRecord, workID string) error {
+	if record.SchemaVersion != 1 || record.Kind != "sync-work" || record.Plan.WorkID != workID {
+		return fmt.Errorf("Sync Work operation record is invalid")
+	}
+	if len(record.Repositories) != len(record.Plan.Repos) {
+		return fmt.Errorf("Sync Work checkpoints do not match plan")
+	}
+	for index := range record.Repositories {
+		if record.Repositories[index].ID != record.Plan.Repos[index].ID {
+			return fmt.Errorf("Sync Work checkpoint %d does not match plan", index)
+		}
+	}
+	return nil
+}
+
 type Locker interface {
 	AcquireExecution(context.Context, string, []string) (func() error, error)
 }
@@ -222,6 +289,7 @@ func (l FileLocker) AcquireExecution(ctx context.Context, workID string, reposit
 type Executor struct {
 	Git    Git
 	Locker Locker
+	Now    func() time.Time
 }
 
 func (e Executor) Execute(ctx context.Context, plan Plan) (result Result, returnErr error) {
@@ -239,31 +307,138 @@ func (e Executor) Execute(ctx context.Context, plan Plan) (result Result, return
 		return result, fmt.Errorf("acquire Sync Work locks: %w", err)
 	}
 	defer func() { returnErr = errors.Join(returnErr, release()) }()
+	record, err := e.loadOrStart(plan)
+	if err != nil {
+		return result, err
+	}
 	result.WorkName = plan.WorkName
-	for _, repository := range plan.Repos {
+	for index, repository := range plan.Repos {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		observed := RepositoryResult{ID: repository.ID, Status: gitops.SyncFailed, From: repository.PreHeadOID}
+		if record.Repositories[index].Status == string(gitops.SyncRebased) || record.Repositories[index].Status == string(gitops.SyncUpToDate) {
+			observed.Status = gitops.SyncStatus(record.Repositories[index].Status)
+			result.Repositories = append(result.Repositories, observed)
+			continue
+		}
+		if repository.Recovery {
+			observed = e.recover(ctx, repository)
+			record.Repositories[index].Status = string(observed.Status)
+			if err := e.save(record); err != nil {
+				return result, err
+			}
+			result.Repositories = append(result.Repositories, observed)
+			continue
+		}
 		if repository.BlockedReason != "" {
 			observed.Err = fmt.Errorf("blocked: %s", repository.BlockedReason)
+			record.Repositories[index].Status = string(observed.Status)
+			if err := e.save(record); err != nil {
+				return result, err
+			}
 			result.Repositories = append(result.Repositories, observed)
 			continue
 		}
 		if err := e.revalidate(ctx, repository); err != nil {
 			observed.Err = fmt.Errorf("state changed after plan: %w", err)
+			record.Repositories[index].Status = string(observed.Status)
+			if err := e.save(record); err != nil {
+				return result, err
+			}
 			result.Repositories = append(result.Repositories, observed)
 			continue
 		}
 		if repository.Relation == RelationEqual || repository.Relation == RelationContainsBase {
 			observed.Status, observed.To = gitops.SyncUpToDate, repository.PreHeadOID
 		} else {
+			record.Repositories[index].Status = "rebasing"
+			if err := e.save(record); err != nil {
+				return result, err
+			}
 			synced := e.Git.RebaseToOID(ctx, repository.Destination, repository.BranchRef, repository.BaseOID)
 			observed.Status, observed.From, observed.To, observed.Err = synced.Status, synced.From, synced.To, synced.Err
+		}
+		record.Repositories[index].Status = string(observed.Status)
+		if err := e.save(record); err != nil {
+			return result, err
 		}
 		result.Repositories = append(result.Repositories, observed)
 	}
 	return result, nil
+}
+
+func (e Executor) recover(ctx context.Context, planned RepositoryPlan) RepositoryResult {
+	result := RepositoryResult{ID: planned.ID, Status: gitops.SyncFailed, From: planned.PreHeadOID}
+	operations, err := e.Git.ActiveOperations(ctx, planned.Destination)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	for _, operation := range operations {
+		if operation == gitops.OperationRebase {
+			synced := e.Git.ContinueRebase(ctx, planned.Destination, planned.BranchRef, planned.BaseOID)
+			result.Status, result.From, result.To, result.Err = synced.Status, synced.From, synced.To, synced.Err
+			return result
+		}
+	}
+	checkout, err := e.Git.InspectCheckout(ctx, planned.Destination)
+	if err != nil || checkout.FullRef != planned.BranchRef {
+		result.Err = fmt.Errorf("recorded Sync rebase is no longer active and its checkout cannot be reconciled")
+		return result
+	}
+	based, err := e.Git.IsAncestor(ctx, planned.SourcePath, planned.BaseOID, checkout.HeadOID)
+	if err != nil || !based {
+		result.Err = fmt.Errorf("recorded Sync rebase is no longer active and HEAD is not based on the planned commit")
+		return result
+	}
+	result.Status, result.To = gitops.SyncRebased, checkout.HeadOID
+	return result
+}
+
+func (e Executor) loadOrStart(plan Plan) (operationRecord, error) {
+	record := operationRecord{SchemaVersion: 1, Kind: "sync-work", Plan: plan, UpdatedAt: e.now().UTC()}
+	for _, repository := range plan.Repos {
+		record.Repositories = append(record.Repositories, checkpoint{ID: repository.ID, Status: "pending"})
+	}
+	var current operationRecord
+	err := work.LoadJSON(plan.OperationRecord, &current)
+	if err == nil {
+		if err := validateRecord(current, plan.WorkID); err != nil {
+			return record, err
+		}
+		for _, checkpoint := range current.Repositories {
+			if checkpoint.Status == string(gitops.SyncConflict) || checkpoint.Status == "rebasing" {
+				return current, nil
+			}
+		}
+		if err := work.ReplaceJSON(plan.OperationRecord, record, 0o600, nil); err != nil {
+			return record, err
+		}
+		return record, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return record, err
+	}
+	if err := os.MkdirAll(filepath.Dir(plan.OperationRecord), 0o700); err != nil {
+		return record, err
+	}
+	if err := work.CreateJSON(plan.OperationRecord, record, 0o600); err != nil {
+		return record, err
+	}
+	return record, nil
+}
+
+func (e Executor) save(record operationRecord) error {
+	record.UpdatedAt = e.now().UTC()
+	return work.ReplaceJSON(record.Plan.OperationRecord, record, 0o600, nil)
+}
+
+func (e Executor) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
 }
 
 func (e Executor) revalidate(ctx context.Context, planned RepositoryPlan) error {

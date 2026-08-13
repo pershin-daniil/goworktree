@@ -222,7 +222,7 @@ func planConfiguredSyncWork(ctx context.Context, name string) (syncwork.Plan, er
 			ID: repository.ID, Remote: cfg.RepoRemote(repository.ID), BasePreference: cfg.RepoBranch(repository.ID),
 		})
 	}
-	return (syncwork.Planner{Git: syncwork.SystemGit{}}).Build(operationCtx, snapshot, configs)
+	return (syncwork.Planner{Git: syncwork.SystemGit{}}).Build(operationCtx, snapshot, controlRoot, configs)
 }
 
 func runConfiguredSyncWork(ctx context.Context, plan syncwork.Plan) (syncwork.Result, error) {
@@ -459,15 +459,15 @@ usage:
   goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
   goworktree add <project> --repos id,id add repos to an existing project
   goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
-  goworktree sync <project>        rebase project branches onto origin bases
+  goworktree sync <work>           plan from fetched OIDs and rebase Work branches
   goworktree branch <project> <repo> adopt a worktree's current branch
   goworktree list
-	  goworktree remove <work> --confirm <exact-work-name> delete Work worktrees and local branches
+  goworktree remove <work> --confirm <exact-work-name> delete Work worktrees and local branches
   goworktree cursor <project>
   goworktree goland <project>
   goworktree open <project>        open project in default program
   goworktree doctor
-  goworktree repair <project>     validate and reconcile project state
+  goworktree repair <work>         apply deterministic repairs from inspected facts
   goworktree config [show|edit|set <key> <value>]
   goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
   goworktree programs <list|add|update|delete|default|search>
@@ -478,8 +478,8 @@ notes:
   use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate the dashboard
   explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
-  repair preserves a corrupt manifest before rebuilding it from worktrees
-	  Remove Work always deletes its confirmed LOCAL branches; remotes are untouched
+  Repair Work refuses ambiguous identity, branch, OID, and corrupt-manifest states
+  Remove Work always deletes its confirmed LOCAL branches; remotes are untouched
   drop -D deletes only LOCAL branches; remotes are untouched
   add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
 

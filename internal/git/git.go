@@ -283,21 +283,7 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	// During a rebase HEAD is detached, so this must run before normal branch
 	// validation. The expected branch was validated when the rebase began.
 	if rebaseInProgress(repo) {
-		result := SyncResult{Status: SyncFailed}
-		if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
-			if rebaseInProgress(repo) {
-				result.Status = SyncConflict
-				result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry sync: %w", err)
-				return result
-			}
-			result.Err = fmt.Errorf("continue rebase: %w", err)
-			return result
-		}
-		result.Status = SyncRebased
-		if head, err := revision(repo, "HEAD"); err == nil {
-			result.To = head
-		}
-		return result
+		return ContinueRebaseContext(ctx, repo, expectedBranch, "")
 	}
 	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
 		return SyncResult{Status: SyncFailed, Err: err}
@@ -308,6 +294,53 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		return SyncResult{Status: SyncFailed, Err: fmt.Errorf("base %s: %w", target, err)}
 	}
 	return RebaseWorktreeToOIDContext(ctx, repo, expectedBranch, to)
+}
+
+// ContinueRebaseContext continues an already active rebase owned by a persisted
+// workflow. Callers must establish that ownership before invoking it.
+func ContinueRebaseContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	result := SyncResult{Status: SyncFailed}
+	if !rebaseInProgress(repo) {
+		result.Err = fmt.Errorf("no rebase is active")
+		return result
+	}
+	if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
+		if rebaseInProgress(repo) {
+			result.Status = SyncConflict
+			result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry Sync Work: %w", err)
+			return result
+		}
+		result.Err = fmt.Errorf("continue rebase: %w", err)
+		return result
+	}
+	branch, err := CurrentBranch(repo)
+	expectedBranch = strings.TrimPrefix(expectedBranch, "refs/heads/")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		result.Err = fmt.Errorf("continued rebase returned to branch %q, expected %q", branch, expectedBranch)
+		return result
+	}
+	head, err := revision(repo, "HEAD")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if baseOID != "" {
+		based, err := IsAncestorContext(ctx, repo, baseOID, head)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		if !based {
+			result.Err = fmt.Errorf("continued rebase result is not based on planned commit %s", shortRevision(baseOID))
+			return result
+		}
+	}
+	result.Status, result.To = SyncRebased, head
+	return result
 }
 
 // RebaseWorktreeToOIDContext rebases onto one immutable commit without
