@@ -4,7 +4,8 @@ silent: true
 
 vars:
   BINARY: goworktree
-  GOLANGCI_LINT: golangci-lint
+  TOOLS_BIN: '{{.ROOT_DIR}}/.tools/bin'
+  GOLANGCI_LINT: '{{.TOOLS_BIN}}/golangci-lint'
   GOLANGCI_LINT_VERSION: 2.12.2
 
 tasks:
@@ -166,11 +167,20 @@ tasks:
           exit 1
         fi
 
+  tools:install:
+    desc: Install pinned development tools into .tools/bin
+    status:
+      - test -x "{{.GOLANGCI_LINT}}"
+      - '"{{.GOLANGCI_LINT}}" version 2>&1 | grep -q "version {{.GOLANGCI_LINT_VERSION}} "'
+    cmds:
+      - mkdir -p "{{.TOOLS_BIN}}"
+      - 'curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "{{.TOOLS_BIN}}" v{{.GOLANGCI_LINT_VERSION}}'
+
   lint:
-    desc: Run pinned static analysis
+    desc: Run pinned local static analysis
     preconditions:
-      - sh: command -v "{{.GOLANGCI_LINT}}" >/dev/null 2>&1
-        msg: "golangci-lint {{.GOLANGCI_LINT_VERSION}} is required; see README.md"
+      - sh: test -x "{{.GOLANGCI_LINT}}"
+        msg: "local golangci-lint is missing; run: task tools:install"
     cmds:
       - |
         version_output="$("{{.GOLANGCI_LINT}}" version 2>&1)"

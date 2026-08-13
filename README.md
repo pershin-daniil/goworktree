@@ -130,11 +130,14 @@ goworktree programs delete vscode
 
 ## Development
 
-Install the pinned `golangci-lint` release once:
+Install pinned development tools into the repository-local `.tools/bin`:
 
 ```bash
-curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+task tools:install
 ```
+
+`task lint` and `task check` use `.tools/bin/golangci-lint` exclusively. A
+global installation from `PATH` is ignored.
 
 Run the complete non-mutating check before committing:
 
