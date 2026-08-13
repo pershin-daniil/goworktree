@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -553,7 +554,10 @@ func (i Inspector) inspectHarness(snapshot *Snapshot, record newwork.OperationRe
 	if snapshot.IntentSource == IntentLegacyManifest {
 		return
 	}
-	expectsHarness := false
+	expectsHarness := len(record.Plan.HarnessUsePaths) > 0
+	if snapshot.Manifest.Value != nil && len(snapshot.Manifest.Value.Harness.UsePaths) > 0 {
+		expectsHarness = true
+	}
 	for _, repository := range snapshot.Repositories {
 		if repository.Intent.IncludeInGoWork {
 			expectsHarness = true
@@ -700,6 +704,10 @@ func matchManifestAndOperation(manifest work.Manifest, record newwork.OperationR
 			intended.Destination != planned.Destination || intended.IncludeInGoWork != planned.IncludeInGoWork {
 			return fmt.Errorf("manifest and operation record disagree on repository %q", intended.ID)
 		}
+	}
+	rootModulesOnly := len(record.Plan.HarnessUsePaths) == 0
+	if manifest.Harness.RootModulesOnly != rootModulesOnly || !slices.Equal(manifest.Harness.UsePaths, record.Plan.HarnessUsePaths) {
+		return fmt.Errorf("manifest and operation record disagree on harness use paths")
 	}
 	return nil
 }

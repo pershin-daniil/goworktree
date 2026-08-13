@@ -98,31 +98,31 @@ func expectedGoWork(plan Plan) ([]byte, HarnessCheckpoint, error) {
 	if err != nil {
 		return nil, HarnessCheckpoint{}, err
 	}
-	var usePaths []string
-	for _, repo := range plan.Repositories {
-		if !repo.IncludeInGoWork {
-			continue
+	modules, err := plannedHarnessModules(plan)
+	if err != nil {
+		return nil, HarnessCheckpoint{}, err
+	}
+	usePaths := make([]string, 0, len(modules))
+	for _, module := range modules {
+		if err := verifyHarnessModuleLocation(plan.WorkRoot, module.destination); err != nil {
+			return nil, HarnessCheckpoint{}, fmt.Errorf("%s: %w", module.label, err)
 		}
-		modulePath := filepath.Join(repo.Destination, "go.mod")
+		modulePath := filepath.Join(module.destination, "go.mod")
 		info, err := os.Lstat(modulePath)
 		if err != nil {
-			return nil, HarnessCheckpoint{}, fmt.Errorf("repository %q root go.mod: %w", repo.ID, err)
+			return nil, HarnessCheckpoint{}, fmt.Errorf("%s go.mod: %w", module.label, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, HarnessCheckpoint{}, fmt.Errorf("repository %q root go.mod is not a regular file", repo.ID)
+			return nil, HarnessCheckpoint{}, fmt.Errorf("%s go.mod is not a regular file", module.label)
 		}
 		moduleVersion, err := readModuleGoVersion(modulePath)
 		if err != nil {
-			return nil, HarnessCheckpoint{}, fmt.Errorf("repository %q: %w", repo.ID, err)
+			return nil, HarnessCheckpoint{}, fmt.Errorf("%s: %w", module.label, err)
 		}
 		if moduleVersion.compare(version) > 0 {
 			version = moduleVersion
 		}
-		relative, err := filepath.Rel(plan.WorkRoot, repo.Destination)
-		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return nil, HarnessCheckpoint{}, fmt.Errorf("repository %q destination is outside Work root", repo.ID)
-		}
-		usePaths = append(usePaths, "./"+filepath.ToSlash(relative))
+		usePaths = append(usePaths, module.usePath)
 	}
 	checkpoint := HarnessCheckpoint{Generated: len(usePaths) > 0, UsePaths: usePaths}
 	if len(usePaths) == 0 {
@@ -136,6 +136,69 @@ func expectedGoWork(plan Plan) ([]byte, HarnessCheckpoint, error) {
 	}
 	content.WriteString(")\n")
 	return []byte(content.String()), checkpoint, nil
+}
+
+type harnessModule struct {
+	label       string
+	destination string
+	usePath     string
+}
+
+func plannedHarnessModules(plan Plan) ([]harnessModule, error) {
+	if len(plan.HarnessUsePaths) > 0 {
+		modules := make([]harnessModule, 0, len(plan.HarnessUsePaths))
+		seen := make(map[string]struct{}, len(plan.HarnessUsePaths))
+		for _, usePath := range plan.HarnessUsePaths {
+			if !strings.HasPrefix(usePath, "./") {
+				return nil, fmt.Errorf("harness use path %q is not Work-relative", usePath)
+			}
+			relative := filepath.FromSlash(strings.TrimPrefix(usePath, "./"))
+			clean := filepath.Clean(relative)
+			if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || "./"+filepath.ToSlash(clean) != usePath {
+				return nil, fmt.Errorf("harness use path %q is unsafe or non-canonical", usePath)
+			}
+			if _, exists := seen[usePath]; exists {
+				return nil, fmt.Errorf("harness use path %q is duplicated", usePath)
+			}
+			seen[usePath] = struct{}{}
+			modules = append(modules, harnessModule{
+				label: "harness path " + strconv.Quote(usePath), destination: filepath.Join(plan.WorkRoot, clean), usePath: usePath,
+			})
+		}
+		return modules, nil
+	}
+
+	var modules []harnessModule
+	for _, repo := range plan.Repositories {
+		if !repo.IncludeInGoWork {
+			continue
+		}
+		relative, err := filepath.Rel(plan.WorkRoot, repo.Destination)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("repository %q destination is outside Work root", repo.ID)
+		}
+		modules = append(modules, harnessModule{
+			label: "repository " + strconv.Quote(repo.ID), destination: repo.Destination,
+			usePath: "./" + filepath.ToSlash(relative),
+		})
+	}
+	return modules, nil
+}
+
+func verifyHarnessModuleLocation(workRoot, destination string) error {
+	canonicalRoot, err := filepath.EvalSymlinks(workRoot)
+	if err != nil {
+		return fmt.Errorf("resolve Work root: %w", err)
+	}
+	canonicalDestination, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		return fmt.Errorf("resolve module directory: %w", err)
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonicalDestination)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("module directory resolves outside Work root")
+	}
+	return nil
 }
 
 func readModuleGoVersion(path string) (goVersion, error) {

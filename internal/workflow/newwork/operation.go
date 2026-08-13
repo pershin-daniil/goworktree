@@ -287,8 +287,9 @@ func manifestFromOperation(record OperationRecord) work.Manifest {
 		Repositories:       repositories,
 		Harness: work.HarnessIntent{
 			Kind:            "go.work",
-			RootModulesOnly: true,
+			RootModulesOnly: len(record.Plan.HarnessUsePaths) == 0,
 			RepositoryIDs:   moduleIDs,
+			UsePaths:        append([]string(nil), record.Plan.HarnessUsePaths...),
 		},
 	}
 }
@@ -336,6 +337,9 @@ func PlanFromManifest(manifest work.Manifest, workRoot, operationPath string) (P
 		WorkName: manifest.Name, WorkID: manifest.WorkID, WorkRoot: workRoot,
 		ManifestPath: filepath.Join(workRoot, ".goworktree.json"), OperationRecordPath: operationPath,
 		Mode: ModeOffline, NoRemoteMutation: true,
+	}
+	if !manifest.Harness.RootModulesOnly {
+		plan.HarnessUsePaths = append([]string(nil), manifest.Harness.UsePaths...)
 	}
 	for _, repository := range manifest.Repositories {
 		plan.Repositories = append(plan.Repositories, RepositoryPlan{

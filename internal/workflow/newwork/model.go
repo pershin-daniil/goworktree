@@ -46,6 +46,7 @@ type Plan struct {
 	Mode                Mode             `json:"mode"`
 	OpenProgram         string           `json:"open_program,omitempty"`
 	Repositories        []RepositoryPlan `json:"repositories"`
+	HarnessUsePaths     []string         `json:"harness_use_paths,omitempty"`
 	NoRemoteMutation    bool             `json:"no_remote_mutation"`
 }
 

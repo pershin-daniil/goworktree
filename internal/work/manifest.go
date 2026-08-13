@@ -3,6 +3,8 @@ package work
 import (
 	"encoding/hex"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,7 @@ type HarnessIntent struct {
 	Kind            string   `json:"kind"`
 	RootModulesOnly bool     `json:"root_modules_only"`
 	RepositoryIDs   []string `json:"repository_ids,omitempty"`
+	UsePaths        []string `json:"use_paths,omitempty"`
 }
 
 func (m Manifest) Validate() error {
@@ -75,8 +78,28 @@ func (m Manifest) Validate() error {
 			expectedModuleIDs = append(expectedModuleIDs, repo.ID)
 		}
 	}
-	if m.Harness.Kind != "go.work" || !m.Harness.RootModulesOnly {
+	if m.Harness.Kind != "go.work" {
 		return fmt.Errorf("unsupported manifest harness intent")
+	}
+	if m.Harness.RootModulesOnly && len(m.Harness.UsePaths) > 0 {
+		return fmt.Errorf("root-modules-only harness cannot define explicit use paths")
+	}
+	if !m.Harness.RootModulesOnly && len(m.Harness.UsePaths) == 0 {
+		return fmt.Errorf("custom harness has no explicit use paths")
+	}
+	seenUsePaths := make(map[string]struct{}, len(m.Harness.UsePaths))
+	for _, usePath := range m.Harness.UsePaths {
+		if !strings.HasPrefix(usePath, "./") || path.IsAbs(usePath) {
+			return fmt.Errorf("manifest harness use path %q is not Work-relative", usePath)
+		}
+		clean := path.Clean(strings.TrimPrefix(usePath, "./"))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || "./"+clean != usePath {
+			return fmt.Errorf("manifest harness use path %q is unsafe or non-canonical", usePath)
+		}
+		if _, exists := seenUsePaths[usePath]; exists {
+			return fmt.Errorf("manifest harness use path %q is duplicated", usePath)
+		}
+		seenUsePaths[usePath] = struct{}{}
 	}
 	if len(m.Harness.RepositoryIDs) != len(expectedModuleIDs) {
 		return fmt.Errorf("manifest harness repositories do not match repository intent")
