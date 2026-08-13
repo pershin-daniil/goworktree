@@ -202,35 +202,6 @@ func runStart(args []string) error {
 	return nil
 }
 
-func pickProject(cfg *config.Config, title string) (string, error) {
-	projects, err := project.List(cfg)
-	if err != nil {
-		return "", err
-	}
-	if len(projects) == 0 {
-		return "", fmt.Errorf("no projects found")
-	}
-
-	items := make([]tui.Item, 0, len(projects))
-	for _, p := range projects {
-		meta := fmt.Sprintf("%d repos", p.Repos)
-		if p.Manifest != nil {
-			ready := p.Manifest.ReadyCount()
-			total := len(p.Manifest.Repos)
-			if ready < total {
-				meta = fmt.Sprintf("%d/%d ready", ready, total)
-			}
-		}
-		items = append(items, tui.Item{
-			ID:    p.Name,
-			Title: p.Name,
-			Desc:  meta,
-		})
-	}
-
-	return tui.Pick(title, items)
-}
-
 func requireManifest(cfg *config.Config, name string) (projectDir string, m *project.Manifest, lock *project.Lock, err error) {
 	projectDir, err = project.Dir(cfg, name)
 	if err != nil {

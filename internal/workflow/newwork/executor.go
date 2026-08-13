@@ -292,7 +292,7 @@ func (e Executor) continueRepositories(ctx context.Context, record *OperationRec
 				}
 				continue
 			}
-			cause := commandErr
+			var cause error
 			if inspectErr != nil {
 				cause = errors.Join(commandErr, inspectErr)
 			} else {

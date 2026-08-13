@@ -130,10 +130,29 @@ goworktree programs delete vscode
 
 ## Development
 
+Install the pinned `golangci-lint` release once:
+
+```bash
+curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+```
+
+Run the complete non-mutating check before committing:
+
+```bash
+task check
+```
+
+GitHub Actions runs the same formatting, lint, and test gates on pushes and
+pull requests.
+
+Individual development commands:
+
 ```bash
 task build
 task test
 task vet
+task lint
+task fmt:check
 task fmt
 ./goworktree doctor
 ```

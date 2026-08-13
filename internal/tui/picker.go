@@ -72,7 +72,7 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 		title = labelStyle.Underline(true).Bold(true).Render(it.Title)
 	}
 
-	fmt.Fprintf(w, "%s%s%s\n    %s", cursor, mark, title, desc)
+	_, _ = fmt.Fprintf(w, "%s%s%s\n    %s", cursor, mark, title, desc)
 }
 
 type pickerKeyMap struct {

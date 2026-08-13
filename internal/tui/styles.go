@@ -29,7 +29,7 @@ var (
 		Foreground(lipgloss.Color("42"))
 
 	errStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196"))
+			Foreground(lipgloss.Color("196"))
 
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
