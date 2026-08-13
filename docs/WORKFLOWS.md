@@ -1,6 +1,6 @@
 # goworktree workflows
 
-Status: draft 0.3 — decisions from workflow debate round 1
+Status: draft 0.4 — decisions from workflow debate round 1
 
 This document defines intended product behavior. It does not describe the
 current implementation. Code, CLI output, and TUI behavior must converge on
@@ -413,6 +413,10 @@ full contract before its implementation is considered complete.
 ### WF-01: Inspect Works
 
 **Goal:** show observed local state without mutation.
+
+Normative single-Work specification:
+[workflows/INSPECT_WORK.md](workflows/INSPECT_WORK.md). Inspect Works composes
+that primitive across independently discovered Work names.
 
 1. Load and validate configuration.
 2. Enumerate Work directories. An absent or empty works root is a valid empty
