@@ -530,11 +530,14 @@ func runContext(ctx context.Context, dir string, args ...string) (string, error)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), contextErr)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), msg, err)
 	}
 	return string(out), nil
 }

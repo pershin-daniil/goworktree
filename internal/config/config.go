@@ -41,6 +41,7 @@ type Config struct {
 type Repo struct {
 	Path          string `json:"path,omitempty"`
 	DefaultBranch string `json:"default_branch,omitempty"`
+	Remote        string `json:"remote,omitempty"`
 	Alias         string `json:"alias,omitempty"`
 }
 
@@ -331,6 +332,13 @@ func (c *Config) RepoBranch(id string) string {
 		return repo.DefaultBranch
 	}
 	return c.DefaultBranch
+}
+
+func (c *Config) RepoRemote(id string) string {
+	if repo, ok := c.Repos[id]; ok && repo.Remote != "" {
+		return repo.Remote
+	}
+	return "origin"
 }
 
 func (c *Config) RepoAlias(id string) string {
