@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
 const (
@@ -85,8 +86,12 @@ func (m *workAppModel) openActionPalette() {
 		if len(m.actions.Programs) == 0 {
 			items = append(items, listItem{openPrefix, "Open Work", "No enabled programs", "configure an enabled Open with program"})
 		}
+		syncBlocked := ""
+		if m.actions.PlanSyncWork == nil || m.actions.RunSyncWork == nil {
+			syncBlocked = "typed Sync Work workflow is unavailable"
+		}
 		items = append(items,
-			listItem{actionSync, "Sync Work", "Fetch and rebase every Work repository", "typed Sync Work workflow is not implemented"},
+			listItem{actionSync, "Sync Work", "Fetch and rebase every Work repository", syncBlocked},
 			listItem{actionRepair, "Repair Work", "Reconcile manifest, Git, and filesystem state", "typed Repair Work workflow is not implemented"},
 			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", "typed Remove Work workflow is not implemented"},
 		)
@@ -148,6 +153,8 @@ func (m workAppModel) activateAction() (tea.Model, tea.Cmd) {
 		return m.refreshFromAction()
 	case item.id == actionResume:
 		return m.startResumeNewWork()
+	case item.id == actionSync:
+		return m.startSyncWorkPlanning()
 	case strings.HasPrefix(item.id, openPrefix):
 		return m.startOpenWork(strings.TrimPrefix(item.id, openPrefix))
 	default:
@@ -485,6 +492,8 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setNewWorkRepositories(0)
 		} else if m.resultReturn == workNewPlan {
 			m.screen = workNewPlan
+		} else if m.resultReturn == workSyncPlan {
+			m.screen = workSyncPlan
 		} else if m.resultReturn == workOverview && m.setWork(m.selectedWorkName, m.selectedRepoID) {
 			// setWork restores the Work overview.
 		} else {
@@ -498,6 +507,124 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.scrollDetail(msg)
 	return m, nil
+}
+
+func (m workAppModel) startSyncWorkPlanning() (tea.Model, tea.Cmd) {
+	if m.actions.PlanSyncWork == nil || m.selectedWorkName == "" {
+		m.actionNotice = "Unavailable: typed Sync Work planning is unavailable"
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, name := m.operationID, m.selectedWorkName
+	m.operationKind = "plan-sync-work"
+	m.operationTitle = "Planning Sync Work · " + name
+	m.operationMessage = "Fetching configured remotes and resolving exact base commits. No local branch is changed during planning…"
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		plan, err := m.actions.PlanSyncWork(operationCtx, name)
+		return syncWorkPlannedMsg{generation: generation, plan: plan, err: err}
+	}
+}
+
+func (m workAppModel) handleSyncWorkPlanned(msg syncWorkPlannedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "plan-sync-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	if msg.err != nil {
+		m.setActionResult("Sync Work plan failed", msg.err.Error(), workOverview, false)
+		return m, nil
+	}
+	m.syncWorkPlan = msg.plan
+	m.screen = workSyncPlan
+	m.setDetail("Sync Work plan", formatSyncWorkPlan(msg.plan))
+	return m, nil
+}
+
+func (m workAppModel) updateSyncWorkPlan(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "s":
+		return m.startRunSyncWork()
+	case "h", "esc":
+		m.setWork(m.selectedWorkName, m.selectedRepoID)
+		return m, nil
+	case "q":
+		m.cancelLoad()
+		m.quitting = true
+		return m, tea.Quit
+	}
+	m.scrollDetail(msg)
+	return m, nil
+}
+
+func (m workAppModel) startRunSyncWork() (tea.Model, tea.Cmd) {
+	if m.actions.RunSyncWork == nil {
+		m.setActionResult("Sync Work unavailable", "Typed Sync Work execution is unavailable.", workSyncPlan, false)
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, plan := m.operationID, m.syncWorkPlan
+	m.operationKind = "run-sync-work"
+	m.operationTitle = "Syncing Work · " + plan.WorkName
+	m.operationMessage = fmt.Sprintf("Revalidating and synchronizing %d repositories. Independent failures do not stop the batch…", len(plan.Repos))
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		result, err := m.actions.RunSyncWork(operationCtx, plan)
+		return syncWorkCompletedMsg{generation: generation, result: result, err: err}
+	}
+}
+
+func (m workAppModel) handleSyncWorkCompleted(msg syncWorkCompletedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "run-sync-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	title := "Work synchronized"
+	content := formatSyncWorkResult(msg.result)
+	if msg.err != nil {
+		title = "Sync Work failed"
+		content = msg.err.Error() + "\n\n" + content
+	} else if msg.result.Failed() {
+		title = "Sync Work needs attention"
+	}
+	m.setActionResult(title, content, workOverview, true)
+	return m, nil
+}
+
+func formatSyncWorkPlan(plan syncwork.Plan) string {
+	lines := []string{
+		factLine("Work", plan.WorkName), factLine("Repositories", fmt.Sprint(len(plan.Repos))),
+		factLine("Remote mutation", "none"), "", "Repository plan",
+	}
+	for _, repository := range plan.Repos {
+		status := string(repository.Relation)
+		if repository.BlockedReason != "" {
+			status = "blocked: " + repository.BlockedReason
+		}
+		lines = append(lines, "", repository.ID,
+			"  status: "+status,
+			"  branch: "+repository.BranchRef+" @ "+syncwork.ShortOID(repository.PreHeadOID),
+			"  base: "+repository.BaseRef+" @ "+syncwork.ShortOID(repository.BaseOID),
+			fmt.Sprintf("  changes: %d staged, %d unstaged, %d untracked", repository.WorkingTree.Staged, repository.WorkingTree.Unstaged, repository.WorkingTree.Untracked),
+		)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatSyncWorkResult(result syncwork.Result) string {
+	lines := []string{factLine("Work", result.WorkName), factLine("Repositories", fmt.Sprint(len(result.Repositories)))}
+	for _, repository := range result.Repositories {
+		line := string(repository.Status)
+		if repository.Err != nil {
+			line += ": " + repository.Err.Error()
+		}
+		lines = append(lines, "", repository.ID, "  "+line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *workAppModel) scrollDetail(msg tea.KeyMsg) {

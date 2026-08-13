@@ -277,14 +277,13 @@ func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 // SyncWorktreeContext lets callers bound fetch/rebase time and cancel an
 // interactive operation without leaving Git subprocesses running.
 func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string) SyncResult {
-	result := SyncResult{Status: SyncFailed}
 	if strings.TrimSpace(base) == "" {
-		result.Err = fmt.Errorf("base branch is empty")
-		return result
+		return SyncResult{Status: SyncFailed, Err: fmt.Errorf("base branch is empty")}
 	}
 	// During a rebase HEAD is detached, so this must run before normal branch
 	// validation. The expected branch was validated when the rebase began.
 	if rebaseInProgress(repo) {
+		result := SyncResult{Status: SyncFailed}
 		if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
 			if rebaseInProgress(repo) {
 				result.Status = SyncConflict
@@ -300,6 +299,30 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		}
 		return result
 	}
+	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
+		return SyncResult{Status: SyncFailed, Err: err}
+	}
+	target := remoteBase(base)
+	to, err := revision(repo, target)
+	if err != nil {
+		return SyncResult{Status: SyncFailed, Err: fmt.Errorf("base %s: %w", target, err)}
+	}
+	return RebaseWorktreeToOIDContext(ctx, repo, expectedBranch, to)
+}
+
+// RebaseWorktreeToOIDContext rebases onto one immutable commit without
+// fetching. It preserves staged, unstaged, and untracked changes around the
+// rebase and never addresses a user stash by a mutable selector.
+func RebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	result := SyncResult{Status: SyncFailed, To: baseOID}
+	if strings.TrimSpace(baseOID) == "" {
+		result.Err = fmt.Errorf("base commit is empty")
+		return result
+	}
+	if rebaseInProgress(repo) {
+		result.Err = fmt.Errorf("rebase is already active")
+		return result
+	}
 	branch, err := CurrentBranch(repo)
 	if err != nil {
 		result.Err = err
@@ -309,11 +332,11 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		result.Err = fmt.Errorf("detached HEAD")
 		return result
 	}
+	expectedBranch = strings.TrimPrefix(expectedBranch, "refs/heads/")
 	if expectedBranch != "" && branch != expectedBranch {
 		result.Err = fmt.Errorf("current branch %q, expected %q", branch, expectedBranch)
 		return result
 	}
-
 	from, err := revision(repo, "HEAD")
 	if err != nil {
 		result.Err = err
@@ -321,19 +344,7 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	}
 	result.From = from
 
-	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
-		result.Err = err
-		return result
-	}
-	target := remoteBase(base)
-	to, err := revision(repo, target)
-	if err != nil {
-		result.Err = fmt.Errorf("base %s: %w", target, err)
-		return result
-	}
-	result.To = to
-
-	alreadyBased, err := isAncestor(repo, to, from)
+	alreadyBased, err := IsAncestorContext(ctx, repo, baseOID, from)
 	if err != nil {
 		result.Err = err
 		return result
@@ -373,10 +384,15 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		return dropStash(repo, stashRef)
 	}
 
-	if _, err := runContext(ctx, repo, "rebase", target); err != nil {
+	if _, err := runContext(ctx, repo,
+		"-c", "rebase.autoStash=false",
+		"-c", "rebase.updateRefs=false",
+		"-c", "rerere.autoupdate=false",
+		"rebase", "--no-autostash", "--no-rebase-merges", "--no-update-refs", "--no-rerere-autoupdate", "--verify", baseOID,
+	); err != nil {
 		if !stashed && rebaseInProgress(repo) {
 			result.Status = SyncConflict
-			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it, stage the files, then retry sync", target)
+			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it and finish or abort the rebase", shortRevision(baseOID))
 			return result
 		}
 		_, _ = run(repo, "rebase", "--abort")
@@ -386,7 +402,7 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 			return result
 		}
 		result.Status = SyncRolledBack
-		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", target, shortRevision(from))
+		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", shortRevision(baseOID), shortRevision(from))
 		result.To = from
 		return result
 	}
@@ -408,9 +424,26 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		return result
 	}
 	result.Status = SyncRolledBack
-	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", target, from)
+	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", shortRevision(baseOID), from)
 	result.To = from
 	return result
+}
+
+// IsAncestorContext reports whether older is an ancestor of newer.
+func IsAncestorContext(ctx context.Context, repo, older, newer string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", older, newer)
+	cmd.Dir = repo
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return false, fmt.Errorf("git merge-base --is-ancestor: %w", contextErr)
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
 func rebaseInProgress(repo string) bool {
@@ -458,19 +491,6 @@ func dropStash(repo, objectID string) error {
 func isDirty(repo string) (bool, error) {
 	out, err := run(repo, "status", "--porcelain", "--untracked-files=normal")
 	return strings.TrimSpace(out) != "", err
-}
-
-func isAncestor(repo, older, newer string) (bool, error) {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", older, newer)
-	cmd.Dir = repo
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
 // ScanRepos walks root up to maxDepth levels and returns primary clones only.

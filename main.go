@@ -13,8 +13,10 @@ import (
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
+	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
 func exitOnError(err error) {
@@ -91,6 +93,7 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		Version: version, Load: inspectConfiguredWorks,
 		PlanNewWork: planConfiguredNewWork, CreateNewWork: createConfiguredNewWork,
 		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
+		PlanSyncWork: planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -117,6 +120,48 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		})
 	}
 	return actions
+}
+
+func planConfiguredSyncWork(ctx context.Context, name string) (syncwork.Plan, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return syncwork.Plan{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return syncwork.Plan{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	snapshot, err := (inspectwork.Inspector{
+		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
+	if err != nil {
+		return syncwork.Plan{}, err
+	}
+	configs := make([]syncwork.RepositoryConfig, 0, len(snapshot.Repositories))
+	for _, repository := range snapshot.Repositories {
+		configs = append(configs, syncwork.RepositoryConfig{
+			ID: repository.ID, Remote: cfg.RepoRemote(repository.ID), BasePreference: cfg.RepoBranch(repository.ID),
+		})
+	}
+	return (syncwork.Planner{Git: syncwork.SystemGit{}}).Build(operationCtx, snapshot, configs)
+}
+
+func runConfiguredSyncWork(ctx context.Context, plan syncwork.Plan) (syncwork.Result, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return syncwork.Result{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return syncwork.Result{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return (syncwork.Executor{
+		Git: syncwork.SystemGit{}, Locker: syncwork.FileLocker{Set: lockops.Set{Root: controlRoot}},
+	}).Execute(operationCtx, plan)
 }
 
 func planConfiguredNewWork(ctx context.Context, request newwork.Request) (newwork.Plan, error) {

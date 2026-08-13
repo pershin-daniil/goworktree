@@ -18,6 +18,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
 const (
@@ -35,6 +36,8 @@ type WorkAppActions struct {
 	CreateNewWork func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
 	ResumeNewWork func(context.Context, string) (newwork.ExecutionResult, error)
 	OpenWork      func(context.Context, WorkOpenRequest) error
+	PlanSyncWork  func(context.Context, string) (syncwork.Plan, error)
+	RunSyncWork   func(context.Context, syncwork.Plan) (syncwork.Result, error)
 }
 
 type WorkRepositoryOption struct {
@@ -68,6 +71,7 @@ const (
 	workNewName
 	workNewRepositories
 	workNewPlan
+	workSyncPlan
 	workOperation
 	workActionResult
 )
@@ -120,6 +124,18 @@ type workOpenedMsg struct {
 	err        error
 }
 
+type syncWorkPlannedMsg struct {
+	generation uint64
+	plan       syncwork.Plan
+	err        error
+}
+
+type syncWorkCompletedMsg struct {
+	generation uint64
+	result     syncwork.Result
+	err        error
+}
+
 type workAppModel struct {
 	actions          WorkAppActions
 	ctx              context.Context
@@ -143,6 +159,7 @@ type workAppModel struct {
 	selectedNewRepos map[string]bool
 	newWorkMode      newwork.Mode
 	newWorkPlan      newwork.Plan
+	syncWorkPlan     syncwork.Plan
 	operationCancel  context.CancelFunc
 	operationID      uint64
 	operationTitle   string
@@ -215,6 +232,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleNewWorkCreated(msg)
 	case workOpenedMsg:
 		return m.handleWorkOpened(msg)
+	case syncWorkPlannedMsg:
+		return m.handleSyncWorkPlanned(msg)
+	case syncWorkCompletedMsg:
+		return m.handleSyncWorkCompleted(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -253,6 +274,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workNewPlan {
 			return m.updateNewWorkPlan(msg)
+		}
+		if m.screen == workSyncPlan {
+			return m.updateSyncWorkPlan(msg)
 		}
 		if m.screen == workActionResult {
 			return m.updateActionResult(msg)
@@ -615,6 +639,8 @@ func (m workAppModel) View() string {
 		return m.listView("New Work · repositories", contextLine, "space toggle  m mode  enter plan  h/esc back  / search  q quit")
 	case workNewPlan:
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/c create  h/esc back  q quit")
+	case workSyncPlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/s sync  h/esc back  q quit")
 	case workOperation:
 		return m.operationView()
 	case workActionResult:
@@ -639,6 +665,8 @@ func (m workAppModel) detailView(hint string) string {
 		subtitle = "Inspection did not complete"
 	case workNewPlan:
 		subtitle = "Review the exact mutation plan"
+	case workSyncPlan:
+		subtitle = "Review fetched immutable base commits"
 	case workActionResult:
 		subtitle = "Operation result"
 	}

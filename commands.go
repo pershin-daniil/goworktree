@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/pershin-daniil/goworktree/internal/config"
 	"github.com/pershin-daniil/goworktree/internal/git"
@@ -462,69 +461,27 @@ func runDrop(args []string) error {
 }
 
 func runSync(args []string) error {
-	cfg, err := config.Load()
+	if len(args) != 1 || args[0] == "" {
+		return fmt.Errorf("usage: goworktree sync <work>")
+	}
+	plan, err := planConfiguredSyncWork(context.Background(), args[0])
 	if err != nil {
 		return err
 	}
-
-	name := ""
-	if len(args) > 0 {
-		name = args[0]
-	}
-	if len(args) != 1 || name == "" {
-		return fmt.Errorf("usage: goworktree sync <project>")
-	}
-
-	projectDir, m, lock, err := requireManifest(cfg, name)
+	fmt.Printf("syncing %q against fetched commits\n", plan.WorkName)
+	result, err := runConfiguredSyncWork(context.Background(), plan)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lock.Release() }()
-	if len(m.Repos) == 0 {
-		return fmt.Errorf("project %q has no repositories", name)
-	}
-
-	counts := map[git.SyncStatus]int{}
-	failed := false
-	fmt.Printf("syncing %q\n", name)
-	for _, r := range m.Repos {
-		folder := r.Folder
-		if folder == "" {
-			folder = r.ID
-		}
-		wtPath, err := project.WorktreePath(projectDir, folder)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.CommandTimeoutSeconds)*time.Second)
-		result := git.SyncWorktreeContext(ctx, wtPath, r.Branch, r.Base)
-		cancel()
-		counts[result.Status]++
-		switch result.Status {
-		case git.SyncRebased:
-			fmt.Printf("  rebased      %s\n", folder)
-		case git.SyncUpToDate:
-			fmt.Printf("  up-to-date   %s\n", folder)
-		case git.SyncConflict:
-			failed = true
-			fmt.Printf("  conflict     %s: %v\n", folder, result.Err)
-			if err := openDefaultProgram(cfg, wtPath); err != nil {
-				fmt.Printf("  editor       %s: %v\n", folder, err)
-			}
-		case git.SyncRolledBack:
-			failed = true
-			fmt.Printf("  rolled-back  %s: %v\n", folder, result.Err)
-		default:
-			failed = true
-			fmt.Printf("  failed       %s: %v\n", folder, result.Err)
+	for _, repository := range result.Repositories {
+		if repository.Err == nil {
+			fmt.Printf("  %-12s %s\n", repository.Status, repository.ID)
+		} else {
+			fmt.Printf("  %-12s %s: %v\n", repository.Status, repository.ID, repository.Err)
 		}
 	}
-
-	fmt.Printf("\nsummary: %d rebased, %d up-to-date, %d conflicts, %d rolled back, %d failed\n",
-		counts[git.SyncRebased], counts[git.SyncUpToDate], counts[git.SyncConflict],
-		counts[git.SyncRolledBack], counts[git.SyncFailed])
-	if failed {
-		return fmt.Errorf("one or more repositories could not be synchronized; resolve conflicts and retry sync")
+	if result.Failed() {
+		return fmt.Errorf("one or more repositories need attention; inspect the results and retry Sync Work")
 	}
 	return nil
 }

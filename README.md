@@ -10,9 +10,9 @@ without mutation or fetch. `n` starts the typed New Work flow; `:` opens actions
 for the current context. New Work fetches only while building an online plan and
 does not create branches or worktrees until that exact plan is confirmed.
 
-The dashboard can create/resume New Work and open a Work in configured programs.
-Sync, Repair, and Remove remain visible but disabled until their typed workflows
-replace the legacy explicit commands.
+The dashboard can create/resume New Work, open a Work in configured programs,
+and run typed Sync Work. Repair and Remove remain visible but disabled until
+their typed workflows replace the legacy explicit commands.
 
 Repo: [github.com/pershin-daniil/goworktree](https://github.com/pershin-daniil/goworktree)
 
@@ -60,7 +60,7 @@ task doctor
 4. **Manifest** — `.goworktree.json` in the project folder. It is atomically written after each repository step, so re-run `start` to **resume** pending/failed repos safely.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
 6. **`remove -D`** — fully delete a project group: its worktrees, local project branches, stale Git worktree registrations, and project folder. Remote branches are never touched.
-7. **`sync`** — fetch `origin` and rebase each project branch onto its configured base. A clean-worktree rebase conflict is kept open, and the conflicting worktree opens in the default program. Resolve and stage it there, then press Enter in the dashboard to retry. Dirty files are auto-stashed and restored by immutable stash ID; conflicts involving that restore are rolled back safely. Sync Git operations use a configurable timeout.
+7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked.
 8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
 9. **`repair`** — validates a project, preserves and rebuilds a corrupt manifest when possible, marks missing worktrees for recreation, and prunes stale Git registrations.
 
@@ -68,12 +68,12 @@ task doctor
 
 | Command | Description |
 |---------|-------------|
-| *(no args)* | Inspect Works, create/resume New Work, and open scoped actions |
+| *(no args)* | Inspect Works and run New, Sync, or Open Work actions |
 | `init` | First-time setup + repo scan |
 | `start <name> --repos id,id [--open]` | Create or resume a project |
 | `add <project> --repos id,id` | Add repos to a project |
 | `drop <project> --repos id,id [-D] [--yes]` | Drop repos (`-D` = delete local branches) |
-| `sync <project>` | Fetch and rebase project branches onto their origin base branches |
+| `sync <work>` | Use the same typed Sync Work planner/executor as the dashboard |
 | `branch <project> <repo>` | Adopt a repository worktree's current branch in the project manifest |
 | `list` / `ls` | List project groups |
 | `remove` / `rm` `<name> [-D] [--yes]` | Delete a project group |
