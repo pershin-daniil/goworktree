@@ -25,6 +25,8 @@ func applyVimListKeys(l *list.Model) {
 	l.KeyMap.CursorDown = key.NewBinding(key.WithKeys("j", "down", "ctrl+n"), key.WithHelp("j", "down"))
 	l.KeyMap.GoToStart = key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top"))
 	l.KeyMap.GoToEnd = key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom"))
+	l.KeyMap.PrevPage = key.NewBinding(key.WithKeys("ctrl+u", "pgup"), key.WithHelp("ctrl+u", "page up"))
+	l.KeyMap.NextPage = key.NewBinding(key.WithKeys("ctrl+d", "pgdown"), key.WithHelp("ctrl+d", "page down"))
 	l.KeyMap.Filter = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
 }
 

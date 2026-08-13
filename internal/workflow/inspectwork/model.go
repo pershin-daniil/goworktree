@@ -18,6 +18,7 @@ type MetadataState string
 const (
 	MetadataAbsent  MetadataState = "absent"
 	MetadataValid   MetadataState = "valid"
+	MetadataLegacy  MetadataState = "legacy"
 	MetadataInvalid MetadataState = "invalid"
 )
 
@@ -37,6 +38,7 @@ type IntentSource string
 const (
 	IntentNone            IntentSource = "none"
 	IntentManifest        IntentSource = "manifest"
+	IntentLegacyManifest  IntentSource = "legacy-manifest"
 	IntentOperationRecord IntentSource = "operation-record"
 )
 

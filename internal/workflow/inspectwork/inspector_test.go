@@ -238,6 +238,55 @@ func TestInspectReportsRebaseAndConflict(t *testing.T) {
 	}
 }
 
+func TestInspectLegacyManifestReadsRepositoryFactsWithoutMigration(t *testing.T) {
+	t.Parallel()
+
+	name := "inspect-legacy"
+	source := newRepository(t, false)
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	workRoot := filepath.Join(worksRoot, name)
+	mustMkdir(t, workRoot)
+	destination := filepath.Join(workRoot, "api")
+	gitRun(t, source, "worktree", "add", "-b", name, destination, "main")
+	manifest := legacyManifest{
+		Name: name, CreatedAt: "2026-08-15T09:00:00Z",
+		Repos: []legacyRepositoryIntent{{
+			ID: "api", Folder: "api", Path: source, Branch: name, Base: "main", Status: "ready",
+		}},
+	}
+	manifestPath := filepath.Join(workRoot, ".goworktree.json")
+	if err := work.CreateJSON(manifestPath, manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := testInspector(nil).Inspect(context.Background(), Request{
+		WorksRoot: worksRoot, ControlRoot: t.TempDir(), Name: name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Manifest.State != MetadataLegacy || snapshot.IntentSource != IntentLegacyManifest {
+		t.Fatalf("legacy metadata = %+v", snapshot)
+	}
+	if len(snapshot.Repositories) != 1 || !snapshot.Repositories[0].CheckoutKnown || !snapshot.Repositories[0].WorkingTreeKnown {
+		t.Fatalf("legacy repository facts = %+v", snapshot.Repositories)
+	}
+	if len(snapshot.Problems) != 0 {
+		t.Fatalf("healthy legacy Work problems = %+v", snapshot.Problems)
+	}
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatal("Inspect Work rewrote legacy manifest")
+	}
+}
+
 func TestInspectRejectsEmptyRoots(t *testing.T) {
 	t.Parallel()
 

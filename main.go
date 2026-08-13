@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/pershin-daniil/goworktree/internal/config"
 	"github.com/pershin-daniil/goworktree/internal/tui"
+	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 )
 
 func exitOnError(err error) {
@@ -25,7 +27,7 @@ const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		exitOnError(tui.RunApp(tui.AppActions{Version: version, Execute: runAppCommand}))
+		exitOnError(tui.RunWorkApp(tui.WorkAppActions{Version: version, Load: inspectConfiguredWorks}))
 		return
 	}
 
@@ -76,6 +78,21 @@ func main() {
 	}
 
 	exitOnError(err)
+}
+
+func inspectConfiguredWorks(ctx context.Context) (inspectworks.Snapshot, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return inspectworks.Snapshot{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return inspectworks.Snapshot{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	inspector := inspectworks.NewSystemInspector()
+	return inspector.Inspect(ctx, inspectworks.Request{
+		WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot,
+	})
 }
 
 func runPrograms(args []string) error {
@@ -133,19 +150,6 @@ func hasFlag(args []string, name string) bool {
 	return false
 }
 
-// runAppCommand executes an explicit CLI invocation while the root TUI owns
-// the terminal.  Capturing both streams prevents Git diagnostics from drawing
-// over Bubble Tea's alternate screen.
-func runAppCommand(args []string) (string, error) {
-	path, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(path, args...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
-}
-
 func runConfig(args []string) error {
 	if len(args) == 0 {
 		return runConfigShow()
@@ -200,7 +204,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `goworktree %s — git worktree helper for multi-repo projects
 
 usage:
-  goworktree                       interactive home menu
+  goworktree                       read-only Works dashboard
   goworktree init
   goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
   goworktree add <project> --repos id,id add repos to an existing project
@@ -219,7 +223,8 @@ usage:
   goworktree programs <list|add|update|delete|default|search>
 
 notes:
-  without arguments, goworktree starts the unified interactive dashboard
+  without arguments, goworktree inspects local Works without mutation or fetch
+  use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate the dashboard
   explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
   repair preserves a corrupt manifest before rebuilding it from worktrees

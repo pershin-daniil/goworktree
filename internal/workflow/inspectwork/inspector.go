@@ -82,7 +82,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("validate Work name: %w", err)
 	}
-	worksRoot, err := canonicalExistingDirectory(request.WorksRoot)
+	worksRoot, err := canonicalOptionalDirectory(request.WorksRoot)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("inspect works root: %w", err)
 	}
@@ -117,6 +117,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	}
 
 	snapshot.WorkRootKind = inspectPath(workRoot)
+	var legacyIntents []work.RepositoryIntent
 	switch snapshot.WorkRootKind {
 	case PathMissing:
 		snapshot.addProblem(Problem{
@@ -124,7 +125,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 			Message: "Work root does not exist", Next: ActionRepairWork,
 		})
 	case PathDirectory:
-		i.inspectManifest(&snapshot)
+		legacyIntents = i.inspectManifest(&snapshot)
 	case PathSymlink, PathRegular, PathOther, PathUnknown:
 		snapshot.addProblem(Problem{
 			Code: ProblemWorkRootUnsafe, Path: workRoot,
@@ -152,6 +153,9 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	case manifestValid:
 		snapshot.IntentSource = IntentManifest
 		intents = append(intents, snapshot.Manifest.Value.Repositories...)
+	case snapshot.Manifest.State == MetadataLegacy:
+		snapshot.IntentSource = IntentLegacyManifest
+		intents = append(intents, legacyIntents...)
 	case recordValid:
 		snapshot.IntentSource = IntentOperationRecord
 		intents = intentsFromOperation(record)
@@ -171,7 +175,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	return snapshot, nil
 }
 
-func (i Inspector) inspectManifest(snapshot *Snapshot) {
+func (i Inspector) inspectManifest(snapshot *Snapshot) []work.RepositoryIntent {
 	var manifest work.Manifest
 	err := work.LoadJSON(snapshot.Manifest.Path, &manifest)
 	if errors.Is(err, os.ErrNotExist) {
@@ -179,15 +183,20 @@ func (i Inspector) inspectManifest(snapshot *Snapshot) {
 			Code: ProblemManifestMissing, Path: snapshot.Manifest.Path,
 			Message: "Work directory exists but its manifest is missing", Next: ActionRepairWork,
 		})
-		return
+		return nil
 	}
 	if err != nil {
+		legacyIntents, legacyErr := loadLegacyManifest(snapshot.Manifest.Path, *snapshot)
+		if legacyErr == nil {
+			snapshot.Manifest.State = MetadataLegacy
+			return legacyIntents
+		}
 		snapshot.Manifest.State = MetadataInvalid
 		snapshot.addProblem(Problem{
 			Code: ProblemManifestInvalid, Path: snapshot.Manifest.Path,
-			Message: err.Error(), Next: ActionRepairWork,
+			Message: errors.Join(err, legacyErr).Error(), Next: ActionRepairWork,
 		})
-		return
+		return nil
 	}
 	if err := manifest.Validate(); err != nil {
 		snapshot.Manifest.State = MetadataInvalid
@@ -195,7 +204,7 @@ func (i Inspector) inspectManifest(snapshot *Snapshot) {
 			Code: ProblemManifestInvalid, Path: snapshot.Manifest.Path,
 			Message: err.Error(), Next: ActionRepairWork,
 		})
-		return
+		return nil
 	}
 	if err := validateManifestScope(manifest, *snapshot); err != nil {
 		snapshot.Manifest.State = MetadataInvalid
@@ -203,16 +212,17 @@ func (i Inspector) inspectManifest(snapshot *Snapshot) {
 			Code: ProblemWorkIdentityMismatch, Path: snapshot.Manifest.Path,
 			Message: err.Error(), Next: ActionRepairWork,
 		})
-		return
+		return nil
 	}
 	snapshot.Manifest.State = MetadataValid
 	snapshot.Manifest.Value = &manifest
+	return nil
 }
 
 func (i Inspector) inspectOperation(snapshot *Snapshot) (newwork.OperationRecord, bool) {
 	record, err := i.Operations.Load(snapshot.Operation.Path)
 	if errors.Is(err, os.ErrNotExist) {
-		if snapshot.WorkRootKind != PathMissing || snapshot.Manifest.State != MetadataAbsent {
+		if snapshot.Manifest.State != MetadataLegacy && (snapshot.WorkRootKind != PathMissing || snapshot.Manifest.State != MetadataAbsent) {
 			snapshot.addProblem(Problem{
 				Code: ProblemOperationMissing, Path: snapshot.Operation.Path,
 				Message: "New Work operation record is missing", Next: ActionRepairWork,
@@ -293,7 +303,7 @@ func (i Inspector) inspectRepository(ctx context.Context, intent work.Repository
 	} else {
 		repository.SourceKnown = true
 		repository.Source = RepositoryIdentity{SourcePath: identity.SourcePath, CommonDir: identity.CommonDir}
-		if identity.SourcePath != intent.SourcePath || identity.CommonDir != intent.GitCommonDir {
+		if source != IntentLegacyManifest && (identity.SourcePath != intent.SourcePath || identity.CommonDir != intent.GitCommonDir) {
 			repository.addProblem(Problem{
 				Code: ProblemSourceIdentityMismatch, Path: intent.SourcePath,
 				Message: "configured source resolves to a different Git repository", Next: ActionRepairWork,
@@ -363,7 +373,7 @@ func (i Inspector) inspectRepository(ctx context.Context, intent work.Repository
 				HeadOID:    checkout.HeadOID,
 				Detached:   checkout.Detached,
 			}
-			if checkout.Identity.CommonDir != intent.GitCommonDir {
+			if intent.GitCommonDir != "" && checkout.Identity.CommonDir != intent.GitCommonDir {
 				repository.addProblem(Problem{
 					Code: ProblemCheckoutIdentityMismatch, Path: intent.Destination,
 					Message: "worktree belongs to a different Git repository", Next: ActionRepairWork,
@@ -478,6 +488,9 @@ func (i Inspector) reconcileHeads(repository *RepositorySnapshot) {
 
 func (i Inspector) inspectHarness(snapshot *Snapshot, record newwork.OperationRecord, verifyOperation bool) {
 	snapshot.Harness.Kind = inspectPath(snapshot.Harness.Path)
+	if snapshot.IntentSource == IntentLegacyManifest {
+		return
+	}
 	expectsHarness := false
 	for _, repository := range snapshot.Repositories {
 		if repository.Intent.IncludeInGoWork {
@@ -511,6 +524,80 @@ func (i Inspector) inspectHarness(snapshot *Snapshot, record newwork.OperationRe
 			Message: "go.work exists although no repository root module is intended", Next: ActionRepairWork,
 		})
 	}
+}
+
+type legacyManifest struct {
+	Name      string                   `json:"name"`
+	CreatedAt string                   `json:"created_at"`
+	Repos     []legacyRepositoryIntent `json:"repos"`
+}
+
+type legacyRepositoryIntent struct {
+	ID     string `json:"id"`
+	Folder string `json:"folder"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Base   string `json:"base"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+func loadLegacyManifest(path string, snapshot Snapshot) ([]work.RepositoryIntent, error) {
+	var manifest legacyManifest
+	if err := work.LoadJSON(path, &manifest); err != nil {
+		return nil, err
+	}
+	if manifest.Name != snapshot.WorkName.String() {
+		return nil, fmt.Errorf("legacy manifest name %q does not match Work directory", manifest.Name)
+	}
+	if manifest.CreatedAt == "" {
+		return nil, fmt.Errorf("legacy manifest creation time is empty")
+	}
+	if _, err := time.Parse(time.RFC3339, manifest.CreatedAt); err != nil {
+		return nil, fmt.Errorf("legacy manifest creation time: %w", err)
+	}
+	if len(manifest.Repos) == 0 {
+		return nil, fmt.Errorf("legacy manifest has no repositories")
+	}
+	seenIDs := make(map[string]struct{}, len(manifest.Repos))
+	seenDestinations := make(map[string]struct{}, len(manifest.Repos))
+	intents := make([]work.RepositoryIntent, 0, len(manifest.Repos))
+	for index, repository := range manifest.Repos {
+		if repository.ID == "" {
+			return nil, fmt.Errorf("legacy manifest repository %d has empty ID", index)
+		}
+		if _, exists := seenIDs[repository.ID]; exists {
+			return nil, fmt.Errorf("legacy manifest repository ID %q is duplicated", repository.ID)
+		}
+		seenIDs[repository.ID] = struct{}{}
+		folder := repository.Folder
+		if folder == "" {
+			folder = repository.ID
+		}
+		if _, err := work.ParseName(folder); err != nil {
+			return nil, fmt.Errorf("legacy manifest repository %q folder: %w", repository.ID, err)
+		}
+		if !filepath.IsAbs(repository.Path) {
+			return nil, fmt.Errorf("legacy manifest repository %q source path is not absolute", repository.ID)
+		}
+		destination := filepath.Join(snapshot.WorkRoot, folder)
+		if _, exists := seenDestinations[destination]; exists {
+			return nil, fmt.Errorf("legacy manifest destination %q is duplicated", destination)
+		}
+		seenDestinations[destination] = struct{}{}
+		branch := repository.Branch
+		if branch == "" {
+			return nil, fmt.Errorf("legacy manifest repository %q branch is empty", repository.ID)
+		}
+		if !strings.HasPrefix(branch, "refs/heads/") {
+			branch = "refs/heads/" + branch
+		}
+		intents = append(intents, work.RepositoryIntent{
+			ID: repository.ID, SourcePath: filepath.Clean(repository.Path), BaseRef: repository.Base,
+			BranchRef: branch, Destination: destination,
+		})
+	}
+	return intents, nil
 }
 
 func validateManifestScope(manifest work.Manifest, snapshot Snapshot) error {
@@ -597,25 +684,6 @@ func inspectPath(path string) PathKind {
 		return PathRegular
 	}
 	return PathOther
-}
-
-func canonicalExistingDirectory(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	canonical, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(canonical)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("not a directory: %s", canonical)
-	}
-	return filepath.Clean(canonical), nil
 }
 
 func canonicalOptionalDirectory(path string) (string, error) {

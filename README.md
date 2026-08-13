@@ -1,10 +1,15 @@
 # goworktree
 
-Personal CLI for **multi-repo git worktree project groups** — pick repos, create a shared branch worktree folder, and open it in any configured program.
+Personal CLI for managing one **Work** as a group of Git worktrees across
+multiple repositories.
 
-Running `goworktree` with no arguments opens one persistent dashboard: navigation, forms, confirmations, progress, and results stay inside the same terminal UI. A failed operation exposes `c` to copy a structured diagnostic report; it can include local paths and Git error text.
+Running `goworktree` with no arguments opens the new read-only Works dashboard.
+It reconciles manifests, operation records, filesystem state, local branches,
+worktree registrations, working changes, and active Git operations. Inspection
+does not fetch, prune, repair, or otherwise mutate repositories.
 
-**MVP status.** Stable enough for daily ticket work. Stack: stdlib CLI, JSON config, Bubble Tea (no external `fzf`).
+The legacy explicit commands remain available while mutating workflows are
+migrated to the new typed core.
 
 Repo: [github.com/pershin-daniil/goworktree](https://github.com/pershin-daniil/goworktree)
 
@@ -26,7 +31,7 @@ Requires: **Go 1.23+**, **git**, and optionally any program that can open a fold
 
 ```bash
 goworktree init                 # TUI: paths + scan repos_root
-goworktree                      # unified interactive dashboard (vim keys)
+goworktree                      # read-only Works dashboard (vim keys)
 goworktree start EVOVPC-2855 --repos api,web # create / resume project group
 goworktree list
 goworktree sync EVOVPC-2855     # rebase project branches onto origin bases
@@ -36,7 +41,7 @@ goworktree cursor EVOVPC-2855   # open a project in Cursor
 With [Task](https://taskfile.dev):
 
 ```bash
-task                  # build + dep check
+task                  # tidy → fmt → lint → test
 task init
 task start -- my-ticket
 task list
@@ -60,7 +65,7 @@ task doctor
 
 | Command | Description |
 |---------|-------------|
-| *(no args)* | Unified interactive dashboard |
+| *(no args)* | Inspect Works, repositories, local changes, and recovery state |
 | `init` | First-time setup + repo scan |
 | `start <name> --repos id,id [--open]` | Create or resume a project |
 | `add <project> --repos id,id` | Add repos to a project |
@@ -77,19 +82,23 @@ task doctor
 | `repos list` / `scan` / `set …` | Manage scanned repos |
 | `version` / `help` | Meta |
 
-## Keys (home menu & pickers)
+## Keys (Works dashboard)
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | down / up |
+| `h` | back |
+| `l` / `Enter` | open |
 | `g` / `G` | top / bottom |
+| `Ctrl+u` / `Ctrl+d` | page up / down |
 | `/` | filter |
-| `Space` | toggle (multi-select) |
-| `Enter` | confirm |
-| `Esc` / `q` | cancel / quit |
+| `r` | reinspect local state |
+| `Esc` | back |
+| `q` | quit |
 | `Ctrl+C` | hard quit |
 
-The dashboard never drops to a console-only screen or asks for a continuation pause. On failure, press `c` to copy the diagnostic report and `Enter`/`Esc` to return to the dashboard. After a sync conflict, resolve and stage the files in the program it opens, then press `Enter` to continue that rebase.
+The minimum supported terminal size is `80×24`. `unknown` is displayed when a
+fact could not be inspected; it is never collapsed into a healthy default.
 
 ## Config sketch
 

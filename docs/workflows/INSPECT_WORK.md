@@ -51,6 +51,12 @@ Each file is classified as `absent`, `valid`, or `invalid`. Invalid JSON,
 unsupported schemas, unsafe metadata file types, invalid embedded paths, and
 identity mismatches are reported explicitly.
 
+During migration, a valid legacy project manifest is classified as `legacy`
+and exposed as `legacy-manifest` intent. Its repository paths, branch refs, and
+destinations are inspected, but it is never rewritten by inspection. Facts that
+the legacy schema did not record, such as the original Git common-directory
+identity and immutable base OID, remain unavailable rather than inferred.
+
 Intent is selected in this order:
 
 1. a valid manifest;
@@ -152,3 +158,10 @@ Inspect Works enumerates candidate Work names and calls Inspect Work for each
 independently. An unreadable or invalid directory is represented as a concrete
 entry problem and does not hide other Works. Enumeration does not adopt an
 unrecorded directory as a Work.
+
+Candidate names are the union of real Work directories and valid New Work
+operation records. Regular files in the works root are ignored. A valid
+operation record can therefore keep an interrupted Work visible before its
+directory or manifest has been published. Invalid operation records are
+reported as collection-level problems because their Work ownership cannot be
+trusted.
