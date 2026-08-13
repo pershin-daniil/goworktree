@@ -292,3 +292,57 @@ func manifestFromOperation(record OperationRecord) work.Manifest {
 		},
 	}
 }
+
+// RecoverCompletedOperation reconstructs the immutable completed New Work
+// record from a valid manifest after that external record was lost. It does
+// not infer repository intent beyond fields already stored in the manifest.
+func RecoverCompletedOperation(manifest work.Manifest, workRoot, operationPath string, now time.Time) (OperationRecord, error) {
+	plan, err := PlanFromManifest(manifest, workRoot, operationPath)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	_, harness, err := expectedGoWork(plan)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	verifiedAt := now.UTC()
+	harness.State, harness.VerifiedAt = StepVerified, &verifiedAt
+	if err := (GoWorkHarness{}).Verify(plan, harness); err != nil {
+		return OperationRecord{}, fmt.Errorf("verify current harness: %w", err)
+	}
+	record := OperationRecord{
+		SchemaVersion: OperationSchemaVersion, OperationID: manifest.NewWorkOperationID, Kind: "new-work",
+		WorkID: manifest.WorkID, Phase: PhaseCreated, Plan: plan, WorkRootReady: true,
+		Harness: harness, CreatedAt: manifest.CreatedAt.UTC(), UpdatedAt: verifiedAt,
+	}
+	for _, repository := range plan.Repositories {
+		record.Repositories = append(record.Repositories, RepositoryCheckpoint{
+			ID: repository.ID, State: StepVerified, VerifiedAt: &verifiedAt, HeadOID: repository.BaseOID,
+		})
+	}
+	if err := record.Validate(); err != nil {
+		return OperationRecord{}, err
+	}
+	return record, nil
+}
+
+// PlanFromManifest reconstructs only intent already present in a valid Work
+// manifest. It performs no Git or filesystem mutation.
+func PlanFromManifest(manifest work.Manifest, workRoot, operationPath string) (Plan, error) {
+	if err := manifest.Validate(); err != nil {
+		return Plan{}, fmt.Errorf("validate manifest: %w", err)
+	}
+	plan := Plan{
+		WorkName: manifest.Name, WorkID: manifest.WorkID, WorkRoot: workRoot,
+		ManifestPath: filepath.Join(workRoot, ".goworktree.json"), OperationRecordPath: operationPath,
+		Mode: ModeOffline, NoRemoteMutation: true,
+	}
+	for _, repository := range manifest.Repositories {
+		plan.Repositories = append(plan.Repositories, RepositoryPlan{
+			ID: repository.ID, SourcePath: repository.SourcePath, GitCommonDir: repository.GitCommonDir,
+			BaseRef: repository.BaseRef, BaseOID: repository.BaseOID, TargetBranchRef: repository.BranchRef,
+			Destination: repository.Destination, IncludeInGoWork: repository.IncludeInGoWork,
+		})
+	}
+	return plan, nil
+}

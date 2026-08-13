@@ -17,6 +17,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
+	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -96,6 +97,7 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
 		PlanSyncWork: planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
 		PlanRemoveWork: planConfiguredRemoveWork, RunRemoveWork: runConfiguredRemoveWork,
+		PlanRepairWork: planConfiguredRepairWork, RunRepairWork: runConfiguredRepairWork,
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -122,6 +124,43 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		})
 	}
 	return actions
+}
+
+func planConfiguredRepairWork(ctx context.Context, name string) (repairwork.Plan, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return repairwork.Plan{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return repairwork.Plan{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	snapshot, err := (inspectwork.Inspector{
+		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
+	if err != nil {
+		return repairwork.Plan{}, err
+	}
+	return (repairwork.Planner{}).Build(snapshot)
+}
+
+func runConfiguredRepairWork(ctx context.Context, plan repairwork.Plan) (repairwork.Result, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return repairwork.Result{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return repairwork.Result{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return (repairwork.Executor{
+		Git: repairwork.SystemGit{}, Locker: repairwork.FileLocker{Set: lockops.Set{Root: controlRoot}},
+		Store: newwork.OperationStore{},
+	}).Execute(operationCtx, plan)
 }
 
 func planConfiguredRemoveWork(ctx context.Context, name string) (removework.Plan, error) {

@@ -19,6 +19,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
+	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -41,6 +42,8 @@ type WorkAppActions struct {
 	RunSyncWork    func(context.Context, syncwork.Plan) (syncwork.Result, error)
 	PlanRemoveWork func(context.Context, string) (removework.Plan, error)
 	RunRemoveWork  func(context.Context, removework.Plan, string) (removework.Result, error)
+	PlanRepairWork func(context.Context, string) (repairwork.Plan, error)
+	RunRepairWork  func(context.Context, repairwork.Plan) (repairwork.Result, error)
 }
 
 type WorkRepositoryOption struct {
@@ -77,6 +80,7 @@ const (
 	workSyncPlan
 	workRemovePlan
 	workRemoveConfirm
+	workRepairPlan
 	workOperation
 	workActionResult
 )
@@ -153,6 +157,18 @@ type removeWorkCompletedMsg struct {
 	err        error
 }
 
+type repairWorkPlannedMsg struct {
+	generation uint64
+	plan       repairwork.Plan
+	err        error
+}
+
+type repairWorkCompletedMsg struct {
+	generation uint64
+	result     repairwork.Result
+	err        error
+}
+
 type workAppModel struct {
 	actions          WorkAppActions
 	ctx              context.Context
@@ -178,6 +194,7 @@ type workAppModel struct {
 	newWorkPlan      newwork.Plan
 	syncWorkPlan     syncwork.Plan
 	removeWorkPlan   removework.Plan
+	repairWorkPlan   repairwork.Plan
 	operationCancel  context.CancelFunc
 	operationID      uint64
 	operationTitle   string
@@ -258,6 +275,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleRemoveWorkPlanned(msg)
 	case removeWorkCompletedMsg:
 		return m.handleRemoveWorkCompleted(msg)
+	case repairWorkPlannedMsg:
+		return m.handleRepairWorkPlanned(msg)
+	case repairWorkCompletedMsg:
+		return m.handleRepairWorkCompleted(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -305,6 +326,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workRemoveConfirm {
 			return m.updateRemoveWorkConfirm(msg)
+		}
+		if m.screen == workRepairPlan {
+			return m.updateRepairWorkPlan(msg)
 		}
 		if m.screen == workActionResult {
 			return m.updateActionResult(msg)
@@ -673,6 +697,8 @@ func (m workAppModel) View() string {
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter continue  h/esc cancel  q quit")
 	case workRemoveConfirm:
 		return m.removeWorkConfirmView()
+	case workRepairPlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/r repair  h/esc back  q quit")
 	case workOperation:
 		return m.operationView()
 	case workActionResult:
@@ -701,6 +727,8 @@ func (m workAppModel) detailView(hint string) string {
 		subtitle = "Review fetched immutable base commits"
 	case workRemovePlan:
 		subtitle = "Irreversible local deletion plan"
+	case workRepairPlan:
+		subtitle = "Only deterministic repairs are included"
 	case workActionResult:
 		subtitle = "Operation result"
 	}

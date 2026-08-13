@@ -11,8 +11,8 @@ for the current context. New Work fetches only while building an online plan and
 does not create branches or worktrees until that exact plan is confirmed.
 
 The dashboard can create/resume New Work, open a Work in configured programs,
-and run typed Sync Work or Remove Work. Repair remains visible but disabled
-until its typed workflow replaces the legacy explicit command.
+and run typed Sync Work, Repair Work, or Remove Work. The dashboard and explicit
+commands call the same workflow cores.
 
 Repo: [github.com/pershin-daniil/goworktree](https://github.com/pershin-daniil/goworktree)
 
@@ -62,7 +62,7 @@ task doctor
 6. **`remove`** — show exact local deletion targets and require the case-sensitive Work name. After confirmation it writes an external recovery record, removes managed worktrees, compare-and-deletes confirmed local branch OIDs, then removes the confirmed Work root. Remote and remote-tracking refs are never deletion targets.
 7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked.
 8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
-9. **`repair`** — validates a project, preserves and rebuilds a corrupt manifest when possible, marks missing worktrees for recreation, and prunes stale Git registrations.
+9. **`repair`** — plans only deterministic repairs: reattach a missing checkout from its exact existing local branch, repair a proven checkout registration, regenerate a missing `go.work`, or reconstruct a missing completed New Work record from a valid manifest. Ambiguous branch, OID, repository-identity, or corrupt-manifest states are reported without mutation.
 
 ## Commands
 
@@ -80,7 +80,7 @@ task doctor
 | `cursor` / `goland` / `open` | Open project in a compatibility editor / the default program |
 | `programs list/add/update/delete/default/search` | Manage programs shown under Open with |
 | `doctor` | Check git, editors, config |
-| `repair <project>` | Reconcile a project manifest and worktrees after interruption or corruption |
+| `repair <work>` | Apply only deterministic, revalidated Repair Work actions |
 | `config show` / `edit` / `set <key> <value>` | Configuration |
 | `repos list` / `scan` / `set …` | Manage scanned repos |
 | `version` / `help` | Meta |

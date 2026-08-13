@@ -105,6 +105,39 @@ func TestDeleteLocalBranchAtOIDRequiresExactTip(t *testing.T) {
 	}
 }
 
+func TestPruneAndAttachWorktreeRestoresMissingCheckout(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	linked := filepath.Join(root, "linked")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "initial")
+	inspectGitRun(t, repo, "worktree", "add", "-b", "work", linked, "main")
+	if err := os.RemoveAll(linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneAndAttachWorktreeContext(context.Background(), repo, linked, "refs/heads/work"); err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := InspectCheckoutContext(context.Background(), linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkout.FullRef != "refs/heads/work" {
+		t.Fatalf("checkout = %+v", checkout)
+	}
+}
+
 func inspectGitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
+	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -95,9 +96,13 @@ func (m *workAppModel) openActionPalette() {
 		if m.actions.PlanRemoveWork == nil || m.actions.RunRemoveWork == nil {
 			removeBlocked = "typed Remove Work workflow is unavailable"
 		}
+		repairBlocked := ""
+		if m.actions.PlanRepairWork == nil || m.actions.RunRepairWork == nil {
+			repairBlocked = "typed Repair Work workflow is unavailable"
+		}
 		items = append(items,
 			listItem{actionSync, "Sync Work", "Fetch and rebase every Work repository", syncBlocked},
-			listItem{actionRepair, "Repair Work", "Reconcile manifest, Git, and filesystem state", "typed Repair Work workflow is not implemented"},
+			listItem{actionRepair, "Repair Work", "Reconcile manifest, Git, and filesystem state", repairBlocked},
 			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", removeBlocked},
 		)
 	}
@@ -162,6 +167,8 @@ func (m workAppModel) activateAction() (tea.Model, tea.Cmd) {
 		return m.startSyncWorkPlanning()
 	case item.id == actionRemove:
 		return m.startRemoveWorkPlanning()
+	case item.id == actionRepair:
+		return m.startRepairWorkPlanning()
 	case strings.HasPrefix(item.id, openPrefix):
 		return m.startOpenWork(strings.TrimPrefix(item.id, openPrefix))
 	default:
@@ -503,6 +510,8 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = workSyncPlan
 		} else if m.resultReturn == workRemovePlan {
 			m.screen = workRemovePlan
+		} else if m.resultReturn == workRepairPlan {
+			m.screen = workRepairPlan
 		} else if m.resultReturn == workOverview && m.setWork(m.selectedWorkName, m.selectedRepoID) {
 			// setWork restores the Work overview.
 		} else {
@@ -774,6 +783,117 @@ func formatRemoveWorkResult(result removework.Result) string {
 			line += ": " + repository.Err.Error()
 		}
 		lines = append(lines, "", repository.ID, "  "+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m workAppModel) startRepairWorkPlanning() (tea.Model, tea.Cmd) {
+	if m.actions.PlanRepairWork == nil || m.selectedWorkName == "" {
+		m.actionNotice = "Unavailable: typed Repair Work planning is unavailable"
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, name := m.operationID, m.selectedWorkName
+	m.operationKind = "plan-repair-work"
+	m.operationTitle = "Planning Repair Work · " + name
+	m.operationMessage = "Classifying observed problems. Ambiguous branch, identity, or metadata conflicts will not be changed automatically…"
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		plan, err := m.actions.PlanRepairWork(operationCtx, name)
+		return repairWorkPlannedMsg{generation: generation, plan: plan, err: err}
+	}
+}
+
+func (m workAppModel) handleRepairWorkPlanned(msg repairWorkPlannedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "plan-repair-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	if msg.err != nil {
+		m.setActionResult("Repair Work needs a decision", msg.err.Error(), workOverview, false)
+		return m, nil
+	}
+	m.repairWorkPlan = msg.plan
+	m.screen = workRepairPlan
+	m.setDetail("Repair Work plan", formatRepairWorkPlan(msg.plan))
+	return m, nil
+}
+
+func (m workAppModel) updateRepairWorkPlan(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "r":
+		return m.startRunRepairWork()
+	case "h", "esc":
+		m.setWork(m.selectedWorkName, m.selectedRepoID)
+		return m, nil
+	case "q":
+		m.cancelLoad()
+		m.quitting = true
+		return m, tea.Quit
+	}
+	m.scrollDetail(msg)
+	return m, nil
+}
+
+func (m workAppModel) startRunRepairWork() (tea.Model, tea.Cmd) {
+	if m.actions.RunRepairWork == nil {
+		m.setActionResult("Repair Work unavailable", "Typed Repair Work execution is unavailable.", workRepairPlan, false)
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, plan := m.operationID, m.repairWorkPlan
+	m.operationKind = "run-repair-work"
+	m.operationTitle = "Repairing Work · " + plan.WorkName
+	m.operationMessage = fmt.Sprintf("Applying and verifying %d deterministic repair actions…", len(plan.Actions))
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		result, err := m.actions.RunRepairWork(operationCtx, plan)
+		return repairWorkCompletedMsg{generation: generation, result: result, err: err}
+	}
+}
+
+func (m workAppModel) handleRepairWorkCompleted(msg repairWorkCompletedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "run-repair-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	title := "Work repaired"
+	content := formatRepairWorkResult(msg.result)
+	if msg.err != nil {
+		title = "Repair Work needs attention"
+		content = msg.err.Error() + "\n\n" + content
+	}
+	m.setActionResult(title, content, workOverview, true)
+	return m, nil
+}
+
+func formatRepairWorkPlan(plan repairwork.Plan) string {
+	lines := []string{factLine("Work", plan.WorkName), factLine("Actions", fmt.Sprint(len(plan.Actions))), factLine("Remote mutation", "none")}
+	if len(plan.Actions) == 0 {
+		lines = append(lines, "", "No deterministic repair is needed.")
+	}
+	for _, action := range plan.Actions {
+		title := string(action.Kind)
+		if action.RepositoryID != "" {
+			title += " · " + action.RepositoryID
+		}
+		lines = append(lines, "", title, "  "+action.Description)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRepairWorkResult(result repairwork.Result) string {
+	lines := []string{factLine("Work", result.WorkName), factLine("Actions", fmt.Sprint(len(result.Actions)))}
+	for _, action := range result.Actions {
+		line := string(action.Kind)
+		if action.RepositoryID != "" {
+			line += " · " + action.RepositoryID
+		}
+		lines = append(lines, "", line, "  "+action.Status)
 	}
 	return strings.Join(lines, "\n")
 }

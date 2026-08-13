@@ -897,29 +897,24 @@ func runDoctor() error {
 
 func runRepair(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: goworktree repair <project>")
+		return fmt.Errorf("usage: goworktree repair <work>")
 	}
-	cfg, err := config.Load()
+	plan, err := planConfiguredRepairWork(context.Background(), args[0])
 	if err != nil {
 		return err
 	}
-	projectDir, err := project.Dir(cfg, args[0])
+	fmt.Printf("repairing %q with %d deterministic actions\n", plan.WorkName, len(plan.Actions))
+	result, err := runConfiguredRepairWork(context.Background(), plan)
 	if err != nil {
 		return err
 	}
-	lock, err := project.AcquireLock(projectDir)
-	if err != nil {
-		return err
+	for _, action := range result.Actions {
+		name := action.RepositoryID
+		if name == "" {
+			name = plan.WorkName
+		}
+		fmt.Printf("  %-26s %s\n", action.Kind, name)
 	}
-	defer func() { _ = lock.Release() }()
-	_, result, err := project.Repair(cfg, projectDir, args[0])
-	if err != nil {
-		return err
-	}
-	if result.Recovered {
-		fmt.Println("preserved corrupt manifest and rebuilt it from worktrees")
-	}
-	fmt.Printf("repaired %q: %d deduplicated, %d missing, %d repositories pruned\n", args[0], result.Deduplicated, result.Missing, result.Pruned)
 	return nil
 }
 

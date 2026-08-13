@@ -273,6 +273,22 @@ func RemoveWorktreeContext(ctx context.Context, source, destination string) erro
 	return err
 }
 
+// PruneAndAttachWorktreeContext removes stale registrations, then attaches the
+// exact existing local branch at a missing destination.
+func PruneAndAttachWorktreeContext(ctx context.Context, source, destination, branchRef string) error {
+	if _, err := runContext(ctx, source, "worktree", "prune"); err != nil {
+		return err
+	}
+	return AttachWorktreeContext(ctx, source, destination, branchRef)
+}
+
+// RepairWorktreeRegistrationContext asks Git to rebuild administrative files
+// for an existing linked checkout at one exact path.
+func RepairWorktreeRegistrationContext(ctx context.Context, source, destination string) error {
+	_, err := runContext(ctx, source, "worktree", "repair", destination)
+	return err
+}
+
 // CreateWorktreeAtOIDContext creates exactly one new local branch and linked
 // worktree from an immutable commit. It never resolves or updates a remote ref.
 func CreateWorktreeAtOIDContext(ctx context.Context, repo, destination, branchRef, oid string) error {
