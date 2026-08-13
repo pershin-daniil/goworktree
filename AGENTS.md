@@ -15,10 +15,11 @@
 
 ## Development workflow
 
-- Format changed Go files with `gofmt` (or run `task fmt`).
-- Run `go test ./...` after behavior changes; use `task test` when Task is installed.
+- Install pinned repository-local development tools with `task tools:install`.
+- The canonical baseline pipeline is the default `task` command. Run it before handing off changes; it executes `tidy`, `fmt`, `lint`, and `test` in that exact order.
+- `task` may update Go source formatting and module metadata. Review resulting changes to `go.mod`, `go.sum`, and formatted files before committing.
+- Use `task check` when a non-mutating formatting, lint, and test gate is required.
 - Run `go vet ./...` for changes that touch command execution, filesystem operations, or concurrency.
-- Run `go mod tidy` only when imports or dependencies change, and review both `go.mod` and `go.sum` afterward.
 - Do not commit the generated root binary `goworktree`.
 
 ## Design and safety constraints

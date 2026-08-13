@@ -139,7 +139,16 @@ task tools:install
 `task lint` and `task check` use `.tools/bin/golangci-lint` exclusively. A
 global installation from `PATH` is ignored.
 
-Run the complete non-mutating check before committing:
+The default command is the canonical development pipeline:
+
+```bash
+task
+```
+
+It runs `tidy → fmt → lint → test` in that order. `tidy` and `fmt` may update
+tracked files; review their changes before committing.
+
+Run the equivalent non-mutating formatting, lint, and test gate with:
 
 ```bash
 task check

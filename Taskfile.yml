@@ -10,26 +10,12 @@ vars:
 
 tasks:
   default:
-    desc: Quickstart — build and show next steps
+    desc: Run the canonical development pipeline
     cmds:
-      - task: build
-      - task: check-deps
-      - |
-        echo ""
-        echo "Quickstart:"
-        echo "  ./{{.BINARY}}             unified interactive dashboard"
-        echo "  task init              interactive setup"
-        echo "  task start -- my-proj --repos api,web  create / resume project"
-        echo "  task add / task drop   change repos in a project"
-        echo "  task sync -- my-proj   rebase project branches"
-        echo "  task branch -- my-proj repo  adopt current worktree branch"
-        echo "  task list              list projects"
-        echo "  task doctor            check deps"
-        echo "  task repair -- my-proj repair project state"
-        echo "  task install           install to \$GOPATH/bin"
-        echo ""
-        echo "Run CLI directly:"
-        echo "  ./{{.BINARY}} help"
+      - task: tidy
+      - task: fmt
+      - task: lint
+      - task: test
 
   build:
     desc: Build binary to ./{{.BINARY}}
