@@ -60,7 +60,7 @@ tasks:
       - ./{{.BINARY}} init
 
   start:
-    desc: Create worktree project (pass name via CLI_ARGS)
+    desc: Create or resume typed New Work (pass name and --repos via CLI_ARGS)
     deps: [build]
     cmds:
       - ./{{.BINARY}} start {{.CLI_ARGS}}

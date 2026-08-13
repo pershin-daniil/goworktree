@@ -35,7 +35,7 @@ Requires: **Go 1.23+**, **git**, and optionally any program that can open a fold
 ```bash
 goworktree init                 # TUI: paths + scan repos_root
 goworktree                      # Works dashboard, New Work, and scoped actions
-goworktree start EVOVPC-2855 --repos api,web # create / resume project group
+goworktree start EVOVPC-2855 --repos api,web # create / resume typed New Work
 goworktree list
 goworktree sync EVOVPC-2855     # plan fetched base OIDs, then rebase Work branches
 goworktree cursor EVOVPC-2855   # open a project in Cursor
@@ -56,8 +56,8 @@ task doctor
 1. **Config** — `~/.config/goworktree/config.json`  
    `repos_root`, `projects_root`, `default_branch`, `scan_depth`, editor paths, and known repos.
 2. **Repo IDs** — relative path under `repos_root` (`cloud/vpc/foo` → `cloud-vpc-foo`). Optional `alias` for UI / folder names.
-3. **`start <name>`** — for each selected repo, creates branch `<name>` from that repo’s base branch into `projects_root/<name>/`. Base resolution: config → `origin/HEAD` → main/master/develop → HEAD.
-4. **Manifest** — `.goworktree.json` in the project folder. It is atomically written after each repository step, so re-run `start` to **resume** pending/failed repos safely.
+3. **`start <name>` / dashboard New Work** — both use the same typed planner/executor. The online plan fetches configured remotes, resolves immutable base OIDs, then creates branch `<name>` and its worktrees only after the plan succeeds. `--offline` resolves only locally known refs.
+4. **Persistence** — `.goworktree.json` stores Work intent; the external New Work operation record stores durable checkpoints. Re-run `start` to resume only verified pending steps.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
 6. **`remove`** — show exact local deletion targets and require the case-sensitive Work name. After confirmation it writes an external recovery record, removes managed worktrees, compare-and-deletes confirmed local branch OIDs, then removes the confirmed Work root. Remote and remote-tracking refs are never deletion targets.
 7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked. An external checkpoint owns an unfinished rebase, so resolving/staging its conflict and repeating Sync continues only that recorded operation.
@@ -70,7 +70,7 @@ task doctor
 |---------|-------------|
 | *(no args)* | Inspect Works and run New, Sync, or Open Work actions |
 | `init` | First-time setup + repo scan |
-| `start <name> --repos id,id [--open]` | Create or resume a project |
+| `start <name> --repos id,id [--offline] [--open]` | Same typed New Work core as the dashboard |
 | `add <project> --repos id,id` | Add repos to a project |
 | `drop <project> --repos id,id [-D] [--yes]` | Drop repos (`-D` = delete local branches) |
 | `sync <work>` | Use the same typed Sync Work planner/executor as the dashboard |

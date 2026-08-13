@@ -456,7 +456,7 @@ func usage() {
 usage:
   goworktree                       Works dashboard, New Work, and scoped actions
   goworktree init
-  goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
+  goworktree start <name> --repos id,id [--offline] [--open] create or resume typed New Work
   goworktree add <project> --repos id,id add repos to an existing project
   goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
   goworktree sync <work>           plan from fetched OIDs and rebase Work branches
@@ -477,7 +477,7 @@ notes:
   use n for New Work and : for the scoped action palette
   use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate the dashboard
   explicit commands never open pickers; pass required arguments and --repos
-  start/add resume incomplete worktrees via .goworktree.json
+  start resumes typed New Work from its external operation record
   Repair Work refuses ambiguous identity, branch, OID, and corrupt-manifest states
   Remove Work always deletes its confirmed LOCAL branches; remotes are untouched
   drop -D deletes only LOCAL branches; remotes are untouched

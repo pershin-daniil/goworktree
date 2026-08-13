@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
+	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
 func csvFlag(args []string, name string) []string {
@@ -77,11 +77,16 @@ func runStart(args []string) error {
 	}
 
 	openDefault := false
+	mode := newwork.ModeOnline
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--open" {
 			openDefault = true
+			continue
+		}
+		if arg == "--offline" {
+			mode = newwork.ModeOffline
 			continue
 		}
 		if isFlagWithValue(args, i, "--repos") {
@@ -99,106 +104,58 @@ func runStart(args []string) error {
 	}
 	name = strings.TrimSpace(name)
 	if len(positional) != 1 || name == "" {
-		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
-	}
-	projectDir, err := project.Path(cfg, name)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		return err
-	}
-	lock, err := project.AcquireLock(projectDir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = lock.Release() }()
-
-	// Resume path: existing incomplete manifest.
-	if m, err := project.LoadManifest(projectDir); err == nil {
-		if removed := m.DeduplicateRepos(); removed > 0 {
-			if err := m.Save(projectDir); err != nil {
-				return fmt.Errorf("repair duplicate repositories in manifest: %w", err)
-			}
-			fmt.Printf("repaired %q: removed %d duplicate repository entry(s)\n", name, removed)
-		}
-		pending := m.NeedsWork()
-		if len(pending) == 0 {
-			fmt.Printf("project %q already complete: %s\n", name, projectDir)
-			if openDefault {
-				return openDefaultProgram(cfg, projectDir)
-			}
-			return nil
-		}
-		fmt.Printf("resuming %q (%d pending)\n", name, len(pending))
-		tasks := tui.TasksFromManifest(projectDir, m, true)
-		if err := runCreateTasks(projectDir, m, tasks); err != nil {
-			return err
-		}
-		if openDefault {
-			return openDefaultProgram(cfg, projectDir)
-		}
-		fmt.Printf("\ndone: %s\n", projectDir)
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("load manifest: %w (run `goworktree repair %s` to recover)", err, name)
-	}
-
-	if len(cfg.RepoNames()) == 0 {
-		return fmt.Errorf("no repositories — run `goworktree repos scan`")
+		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--offline] [--open]")
 	}
 
 	selected := csvFlag(args, "--repos")
 	if len(selected) == 0 {
-		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--open]")
+		return fmt.Errorf("usage: goworktree start <name> --repos id,id [--offline] [--open]")
 	}
 	if err := uniqueIDs(selected); err != nil {
 		return err
 	}
-
-	repos := make([]project.ManifestRepo, 0, len(selected))
-	for _, id := range selected {
-		repoPath, ok := cfg.RepoPath(id)
-		if !ok {
-			return fmt.Errorf("unknown repo %q", id)
+	ctx := context.Background()
+	if works, inspectErr := inspectConfiguredWorks(ctx); inspectErr == nil {
+		for _, entry := range works.Works {
+			if entry.Name == name && entry.Snapshot != nil && entry.Snapshot.Operation.ResumeSuggested {
+				fmt.Printf("resuming New Work %q\n", name)
+				result, err := resumeConfiguredNewWork(ctx, entry.Snapshot.Operation.Path)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("status: %s\nroot: %s\n", result.Status, result.WorkRoot)
+				if openDefault {
+					return openDefaultProgram(cfg, result.WorkRoot)
+				}
+				return nil
+			}
 		}
-		preferred := cfg.RepoBranch(id)
-		base, err := git.ResolveBaseBranch(repoPath, preferred)
-		if err != nil {
-			return fmt.Errorf("%s: %w", cfg.DisplayName(id), err)
-		}
-		if preferred != "" && !git.SameBranchRef(preferred, base) {
-			fmt.Printf("  %s: base %q not found, using %s\n", cfg.DisplayName(id), preferred, base)
-		}
-		folder := cfg.FolderName(id, selected)
-		repos = append(repos, project.ManifestRepo{
-			ID:     id,
-			Folder: folder,
-			Path:   repoPath,
-			Branch: name,
-			Base:   base,
-			Status: project.StatusPending,
-		})
 	}
-
-	m := project.NewManifest(name, repos)
-	if err := m.Save(projectDir); err != nil {
+	request := newwork.Request{Name: name, RepositoryIDs: selected, BaseOverrides: map[string]string{}, Mode: mode}
+	plan, err := planConfiguredNewWork(ctx, request)
+	if err != nil {
 		return err
 	}
-
-	tasks := tui.TasksFromManifest(projectDir, m, true)
-	if err := runCreateTasks(projectDir, m, tasks); err != nil {
+	fmt.Printf("creating New Work %q from %d immutable base commits\n", name, len(plan.Repositories))
+	for _, repository := range plan.Repositories {
+		fmt.Printf("  %-24s %s @ %s\n", repository.ID, repository.BaseRef, shortCLIRevision(repository.BaseOID))
+	}
+	result, err := createConfiguredNewWork(ctx, plan)
+	if err != nil {
 		return err
 	}
-
+	fmt.Printf("status: %s\nroot: %s\n", result.Status, result.WorkRoot)
 	if openDefault {
-		if err := openDefaultProgram(cfg, projectDir); err != nil {
-			return err
-		}
+		return openDefaultProgram(cfg, result.WorkRoot)
 	}
-
-	fmt.Printf("\ndone: %s\n", projectDir)
 	return nil
+}
+
+func shortCLIRevision(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
 }
 
 func requireManifest(cfg *config.Config, name string) (projectDir string, m *project.Manifest, lock *project.Lock, err error) {
