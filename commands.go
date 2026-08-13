@@ -821,59 +821,26 @@ func runList() error {
 }
 
 func runRemove(args []string) error {
-	cfg, err := config.Load()
+	if len(args) < 2 || args[0] == "" {
+		return fmt.Errorf("usage: goworktree remove <work> --confirm <exact-work-name>")
+	}
+	name, confirmation := args[0], flagValue(args[1:], "--confirm")
+	if confirmation == "" {
+		return fmt.Errorf("Remove Work requires --confirm <exact-work-name>")
+	}
+	plan, err := planConfiguredRemoveWork(context.Background(), name)
 	if err != nil {
 		return err
 	}
-
-	deleteBranches := false
-	assumeYes := false
-	var positional []string
-	for _, arg := range args {
-		switch arg {
-		case "--delete-branches", "-D":
-			deleteBranches = true
-		case "--yes":
-			assumeYes = true
-		default:
-			positional = append(positional, arg)
-		}
+	fmt.Printf("removing %q: %d worktrees and local branches; remote refs are untouched\n", plan.WorkName, len(plan.Repositories))
+	result, err := runConfiguredRemoveWork(context.Background(), plan, confirmation)
+	for _, repository := range result.Repositories {
+		fmt.Printf("  %-14s %s\n", repository.Status, repository.ID)
 	}
-
-	name := ""
-	if len(positional) > 0 {
-		name = positional[0]
-	}
-	if len(positional) != 1 || name == "" {
-		return fmt.Errorf("usage: goworktree remove <project> [-D] [--yes]")
-	}
-
-	entry, err := project.Find(cfg, name)
 	if err != nil {
 		return err
 	}
-	lock, err := project.AcquireLock(entry.Path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = lock.Release() }()
-
-	msg := fmt.Sprintf("Remove project %q?\n\n%s\n%d worktree(s) will be deleted.",
-		entry.Name, entry.Path, len(entry.Worktrees))
-	if deleteBranches {
-		msg += "\n\nAlso deletes LOCAL project branches (-D). Remote branches are not touched."
-	}
-	if !assumeYes {
-		return fmt.Errorf("refusing destructive operation without --yes: %s", strings.ReplaceAll(msg, "\n", " "))
-	}
-
-	for _, wt := range entry.Worktrees {
-		fmt.Printf("  removing %s\n", wt.Name)
-	}
-	if err := project.Remove(entry, deleteBranches); err != nil {
-		return err
-	}
-	fmt.Printf("\nremoved: %s\n", entry.Name)
+	fmt.Printf("removed: %s\n", result.WorkName)
 	return nil
 }
 

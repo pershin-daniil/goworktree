@@ -18,6 +18,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -28,16 +29,18 @@ const (
 )
 
 type WorkAppActions struct {
-	Version       string
-	Load          func(context.Context) (inspectworks.Snapshot, error)
-	Repositories  []WorkRepositoryOption
-	Programs      []WorkProgramOption
-	PlanNewWork   func(context.Context, newwork.Request) (newwork.Plan, error)
-	CreateNewWork func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
-	ResumeNewWork func(context.Context, string) (newwork.ExecutionResult, error)
-	OpenWork      func(context.Context, WorkOpenRequest) error
-	PlanSyncWork  func(context.Context, string) (syncwork.Plan, error)
-	RunSyncWork   func(context.Context, syncwork.Plan) (syncwork.Result, error)
+	Version        string
+	Load           func(context.Context) (inspectworks.Snapshot, error)
+	Repositories   []WorkRepositoryOption
+	Programs       []WorkProgramOption
+	PlanNewWork    func(context.Context, newwork.Request) (newwork.Plan, error)
+	CreateNewWork  func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
+	ResumeNewWork  func(context.Context, string) (newwork.ExecutionResult, error)
+	OpenWork       func(context.Context, WorkOpenRequest) error
+	PlanSyncWork   func(context.Context, string) (syncwork.Plan, error)
+	RunSyncWork    func(context.Context, syncwork.Plan) (syncwork.Result, error)
+	PlanRemoveWork func(context.Context, string) (removework.Plan, error)
+	RunRemoveWork  func(context.Context, removework.Plan, string) (removework.Result, error)
 }
 
 type WorkRepositoryOption struct {
@@ -72,6 +75,8 @@ const (
 	workNewRepositories
 	workNewPlan
 	workSyncPlan
+	workRemovePlan
+	workRemoveConfirm
 	workOperation
 	workActionResult
 )
@@ -136,6 +141,18 @@ type syncWorkCompletedMsg struct {
 	err        error
 }
 
+type removeWorkPlannedMsg struct {
+	generation uint64
+	plan       removework.Plan
+	err        error
+}
+
+type removeWorkCompletedMsg struct {
+	generation uint64
+	result     removework.Result
+	err        error
+}
+
 type workAppModel struct {
 	actions          WorkAppActions
 	ctx              context.Context
@@ -160,6 +177,7 @@ type workAppModel struct {
 	newWorkMode      newwork.Mode
 	newWorkPlan      newwork.Plan
 	syncWorkPlan     syncwork.Plan
+	removeWorkPlan   removework.Plan
 	operationCancel  context.CancelFunc
 	operationID      uint64
 	operationTitle   string
@@ -236,6 +254,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSyncWorkPlanned(msg)
 	case syncWorkCompletedMsg:
 		return m.handleSyncWorkCompleted(msg)
+	case removeWorkPlannedMsg:
+		return m.handleRemoveWorkPlanned(msg)
+	case removeWorkCompletedMsg:
+		return m.handleRemoveWorkCompleted(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -277,6 +299,12 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workSyncPlan {
 			return m.updateSyncWorkPlan(msg)
+		}
+		if m.screen == workRemovePlan {
+			return m.updateRemoveWorkPlan(msg)
+		}
+		if m.screen == workRemoveConfirm {
+			return m.updateRemoveWorkConfirm(msg)
 		}
 		if m.screen == workActionResult {
 			return m.updateActionResult(msg)
@@ -641,6 +669,10 @@ func (m workAppModel) View() string {
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/c create  h/esc back  q quit")
 	case workSyncPlan:
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/s sync  h/esc back  q quit")
+	case workRemovePlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter continue  h/esc cancel  q quit")
+	case workRemoveConfirm:
+		return m.removeWorkConfirmView()
 	case workOperation:
 		return m.operationView()
 	case workActionResult:
@@ -667,10 +699,20 @@ func (m workAppModel) detailView(hint string) string {
 		subtitle = "Review the exact mutation plan"
 	case workSyncPlan:
 		subtitle = "Review fetched immutable base commits"
+	case workRemovePlan:
+		subtitle = "Irreversible local deletion plan"
 	case workActionResult:
 		subtitle = "Operation result"
 	}
 	return Title(m.detailTitle) + "\n" + subtitleStyle.Render(subtitle) + "\n\n" + m.viewport.View() + "\n" + hintStyle.Render(hint)
+}
+
+func (m workAppModel) removeWorkConfirmView() string {
+	message := fmt.Sprintf("Type %s exactly. This deletes listed dirty files and unique local commits.", m.removeWorkPlan.WorkName)
+	if m.actionNotice != "" {
+		message = m.actionNotice
+	}
+	return Title("Remove Work · confirm") + "\n" + subtitleStyle.Render(message) + "\n\n" + m.input.View() + "\n\n" + hintStyle.Render("enter remove  esc cancel")
 }
 
 func (m workAppModel) newWorkNameView() string {

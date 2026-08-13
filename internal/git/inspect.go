@@ -235,6 +235,44 @@ func CommitExistsContext(ctx context.Context, repo, oid string) error {
 	return err
 }
 
+// DeleteLocalBranchAtOIDContext deletes one exact local ref only when it still
+// points at expectedOID. Remote and remote-tracking refs are not addressed.
+func DeleteLocalBranchAtOIDContext(ctx context.Context, repo, fullRef, expectedOID string) error {
+	if !strings.HasPrefix(fullRef, "refs/heads/") || strings.TrimPrefix(fullRef, "refs/heads/") == "" {
+		return fmt.Errorf("not a full local branch ref: %q", fullRef)
+	}
+	if strings.TrimSpace(expectedOID) == "" {
+		return fmt.Errorf("expected branch OID is empty")
+	}
+	observed, exists, err := LocalBranchOIDContext(ctx, repo, fullRef)
+	if err != nil {
+		return err
+	}
+	if !exists || observed != expectedOID {
+		return fmt.Errorf("local branch %s changed: expected %s, observed %s", fullRef, expectedOID, observed)
+	}
+	_, err = runContext(ctx, repo, "update-ref", "-d", fullRef, expectedOID)
+	return err
+}
+
+// RemoveWorktreeContext removes one exact registered worktree through its
+// source repository, so it also works when the linked checkout is broken.
+func RemoveWorktreeContext(ctx context.Context, source, destination string) error {
+	canonicalSource, err := canonicalExistingPath(source)
+	if err != nil {
+		return fmt.Errorf("canonical source path: %w", err)
+	}
+	destination, err = filepath.Abs(destination)
+	if err != nil {
+		return fmt.Errorf("absolute worktree path: %w", err)
+	}
+	if _, err := runContext(ctx, canonicalSource, "worktree", "remove", "--force", filepath.Clean(destination)); err != nil {
+		return err
+	}
+	_, err = runContext(ctx, canonicalSource, "worktree", "prune")
+	return err
+}
+
 // CreateWorktreeAtOIDContext creates exactly one new local branch and linked
 // worktree from an immutable commit. It never resolves or updates a remote ref.
 func CreateWorktreeAtOIDContext(ctx context.Context, repo, destination, branchRef, oid string) error {

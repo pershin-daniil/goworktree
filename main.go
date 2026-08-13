@@ -16,6 +16,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -94,6 +95,7 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		PlanNewWork: planConfiguredNewWork, CreateNewWork: createConfiguredNewWork,
 		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
 		PlanSyncWork: planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
+		PlanRemoveWork: planConfiguredRemoveWork, RunRemoveWork: runConfiguredRemoveWork,
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -120,6 +122,42 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		})
 	}
 	return actions
+}
+
+func planConfiguredRemoveWork(ctx context.Context, name string) (removework.Plan, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return removework.Plan{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return removework.Plan{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	snapshot, err := (inspectwork.Inspector{
+		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
+	if err != nil {
+		return removework.Plan{}, err
+	}
+	return (removework.Planner{}).Build(snapshot, controlRoot)
+}
+
+func runConfiguredRemoveWork(ctx context.Context, plan removework.Plan, confirmation string) (removework.Result, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return removework.Result{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return removework.Result{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return (removework.Executor{
+		Git: removework.SystemGit{}, Locker: removework.FileLocker{Set: lockops.Set{Root: controlRoot}},
+	}).Execute(operationCtx, plan, confirmation)
 }
 
 func planConfiguredSyncWork(ctx context.Context, name string) (syncwork.Plan, error) {
@@ -385,7 +423,7 @@ usage:
   goworktree sync <project>        rebase project branches onto origin bases
   goworktree branch <project> <repo> adopt a worktree's current branch
   goworktree list
-  goworktree remove <project> [-D] [--yes] delete whole project group
+	  goworktree remove <work> --confirm <exact-work-name> delete Work worktrees and local branches
   goworktree cursor <project>
   goworktree goland <project>
   goworktree open <project>        open project in default program
@@ -402,7 +440,7 @@ notes:
   explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json
   repair preserves a corrupt manifest before rebuilding it from worktrees
-  remove -D fully clears project worktrees and LOCAL branches; remotes are untouched
+	  Remove Work always deletes its confirmed LOCAL branches; remotes are untouched
   drop -D deletes only LOCAL branches; remotes are untouched
   add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
 

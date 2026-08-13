@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
@@ -90,10 +91,14 @@ func (m *workAppModel) openActionPalette() {
 		if m.actions.PlanSyncWork == nil || m.actions.RunSyncWork == nil {
 			syncBlocked = "typed Sync Work workflow is unavailable"
 		}
+		removeBlocked := ""
+		if m.actions.PlanRemoveWork == nil || m.actions.RunRemoveWork == nil {
+			removeBlocked = "typed Remove Work workflow is unavailable"
+		}
 		items = append(items,
 			listItem{actionSync, "Sync Work", "Fetch and rebase every Work repository", syncBlocked},
 			listItem{actionRepair, "Repair Work", "Reconcile manifest, Git, and filesystem state", "typed Repair Work workflow is not implemented"},
-			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", "typed Remove Work workflow is not implemented"},
+			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", removeBlocked},
 		)
 	}
 	items = append(items, listItem{actionRefresh, "Refresh", "Reinspect Git and filesystem state", ""})
@@ -155,6 +160,8 @@ func (m workAppModel) activateAction() (tea.Model, tea.Cmd) {
 		return m.startResumeNewWork()
 	case item.id == actionSync:
 		return m.startSyncWorkPlanning()
+	case item.id == actionRemove:
+		return m.startRemoveWorkPlanning()
 	case strings.HasPrefix(item.id, openPrefix):
 		return m.startOpenWork(strings.TrimPrefix(item.id, openPrefix))
 	default:
@@ -494,6 +501,8 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = workNewPlan
 		} else if m.resultReturn == workSyncPlan {
 			m.screen = workSyncPlan
+		} else if m.resultReturn == workRemovePlan {
+			m.screen = workRemovePlan
 		} else if m.resultReturn == workOverview && m.setWork(m.selectedWorkName, m.selectedRepoID) {
 			// setWork restores the Work overview.
 		} else {
@@ -619,6 +628,148 @@ func formatSyncWorkResult(result syncwork.Result) string {
 	lines := []string{factLine("Work", result.WorkName), factLine("Repositories", fmt.Sprint(len(result.Repositories)))}
 	for _, repository := range result.Repositories {
 		line := string(repository.Status)
+		if repository.Err != nil {
+			line += ": " + repository.Err.Error()
+		}
+		lines = append(lines, "", repository.ID, "  "+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m workAppModel) startRemoveWorkPlanning() (tea.Model, tea.Cmd) {
+	if m.actions.PlanRemoveWork == nil || m.selectedWorkName == "" {
+		m.actionNotice = "Unavailable: typed Remove Work planning is unavailable"
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, name := m.operationID, m.selectedWorkName
+	m.operationKind = "plan-remove-work"
+	m.operationTitle = "Planning Remove Work · " + name
+	m.operationMessage = "Inspecting exact local worktree, branch, dirty-file, and Work-root deletion targets. No network operation is performed…"
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		plan, err := m.actions.PlanRemoveWork(operationCtx, name)
+		return removeWorkPlannedMsg{generation: generation, plan: plan, err: err}
+	}
+}
+
+func (m workAppModel) handleRemoveWorkPlanned(msg removeWorkPlannedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "plan-remove-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	if msg.err != nil {
+		m.setActionResult("Remove Work plan failed", msg.err.Error(), workOverview, false)
+		return m, nil
+	}
+	m.removeWorkPlan = msg.plan
+	m.screen = workRemovePlan
+	m.setDetail("Remove Work plan", formatRemoveWorkPlan(msg.plan))
+	return m, nil
+}
+
+func (m workAppModel) updateRemoveWorkPlan(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "l":
+		m.input.SetValue("")
+		m.input.Focus()
+		m.actionNotice = ""
+		m.screen = workRemoveConfirm
+		return m, nil
+	case "h", "esc":
+		m.setWork(m.selectedWorkName, m.selectedRepoID)
+		return m, nil
+	case "q":
+		m.cancelLoad()
+		m.quitting = true
+		return m, tea.Quit
+	}
+	m.scrollDetail(msg)
+	return m, nil
+}
+
+func (m workAppModel) updateRemoveWorkConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.input.Blur()
+		m.screen = workRemovePlan
+		return m, nil
+	case "enter":
+		if m.input.Value() != m.removeWorkPlan.WorkName {
+			m.actionNotice = fmt.Sprintf("Confirmation must exactly equal %s", m.removeWorkPlan.WorkName)
+			return m, nil
+		}
+		m.input.Blur()
+		return m.startRunRemoveWork(m.input.Value())
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.actionNotice = ""
+	return m, cmd
+}
+
+func (m workAppModel) startRunRemoveWork(confirmation string) (tea.Model, tea.Cmd) {
+	if m.actions.RunRemoveWork == nil {
+		m.setActionResult("Remove Work unavailable", "Typed Remove Work execution is unavailable.", workRemovePlan, false)
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation, plan := m.operationID, m.removeWorkPlan
+	m.operationKind = "run-remove-work"
+	m.operationTitle = "Removing Work · " + plan.WorkName
+	m.operationMessage = "Recording removal intent externally, then deleting exact worktrees, local refs, and the confirmed Work root…"
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		result, err := m.actions.RunRemoveWork(operationCtx, plan, confirmation)
+		return removeWorkCompletedMsg{generation: generation, result: result, err: err}
+	}
+}
+
+func (m workAppModel) handleRemoveWorkCompleted(msg removeWorkCompletedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "run-remove-work" {
+		return m, nil
+	}
+	m.finishOperation()
+	title := "Work removed"
+	content := formatRemoveWorkResult(msg.result)
+	if msg.err != nil {
+		title = "Remove Work needs attention"
+		content = msg.err.Error() + "\n\n" + content
+	}
+	m.selectedWorkName = ""
+	m.selectedRepoID = ""
+	m.setActionResult(title, content, workHome, true)
+	return m, nil
+}
+
+func formatRemoveWorkPlan(plan removework.Plan) string {
+	lines := []string{
+		factLine("Work", plan.WorkName), factLine("Root", plan.WorkRoot),
+		factLine("Repositories", fmt.Sprint(len(plan.Repositories))), factLine("Remote mutation", "none"),
+		factLine("Recovery record", plan.OperationRecord), "", "This operation is irreversible at product level.",
+	}
+	for _, repository := range plan.Repositories {
+		lines = append(lines, "", repository.ID,
+			"  worktree: "+repository.Destination,
+			"  delete local ref: "+repository.BranchRef+" @ "+syncwork.ShortOID(repository.BranchOID),
+			fmt.Sprintf("  delete changes: %d staged, %d unstaged, %d untracked, %d ignored, %d conflicted", repository.WorkingTree.Staged, repository.WorkingTree.Unstaged, repository.WorkingTree.Untracked, repository.WorkingTree.Ignored, repository.WorkingTree.Conflicted),
+		)
+	}
+	lines = append(lines, "", "Work-root entries")
+	for _, entry := range plan.RootEntries {
+		lines = append(lines, "  "+entry.Kind+"  "+entry.Name)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRemoveWorkResult(result removework.Result) string {
+	lines := []string{factLine("Work", result.WorkName), factLine("Root removed", fmt.Sprint(result.RootRemoved))}
+	for _, repository := range result.Repositories {
+		line := repository.Status
 		if repository.Err != nil {
 			line += ": " + repository.Err.Error()
 		}

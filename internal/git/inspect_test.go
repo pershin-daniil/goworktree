@@ -71,6 +71,40 @@ func TestResolveNewWorkBaseOverrideIsAuthoritative(t *testing.T) {
 	}
 }
 
+func TestDeleteLocalBranchAtOIDRequiresExactTip(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "initial")
+	inspectGitRun(t, repo, "branch", "work")
+	oid, exists, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/work")
+	if err != nil || !exists {
+		t.Fatalf("branch OID = %q, %v, %v", oid, exists, err)
+	}
+	if err := DeleteLocalBranchAtOIDContext(context.Background(), repo, "refs/heads/work", strings.Repeat("0", 40)); err == nil {
+		t.Fatal("branch deleted with a mismatched expected OID")
+	}
+	if _, exists, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/work"); err != nil || !exists {
+		t.Fatalf("branch missing after rejected deletion: %v, %v", exists, err)
+	}
+	if err := DeleteLocalBranchAtOIDContext(context.Background(), repo, "refs/heads/work", oid); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/work"); err != nil || exists {
+		t.Fatalf("branch still exists: %v, %v", exists, err)
+	}
+}
+
 func inspectGitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
