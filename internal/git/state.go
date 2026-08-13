@@ -124,13 +124,27 @@ func ActiveOperationsContext(ctx context.Context, repo string) ([]ActiveOperatio
 		{path: "BISECT_LOG", kind: OperationBisect},
 		{path: "sequencer", kind: OperationSequencer, dir: true},
 	}
+	args := []string{"rev-parse", "--path-format=absolute"}
+	for _, item := range markers {
+		args = append(args, "--git-path", item.path)
+	}
+	out, err := runContext(ctx, repo, args...)
+	if err != nil {
+		return nil, err
+	}
+	paths := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(paths) != len(markers) {
+		return nil, fmt.Errorf("Git returned %d operation paths, expected %d", len(paths), len(markers))
+	}
+
 	seen := make(map[ActiveOperation]struct{}, len(markers))
 	var operations []ActiveOperation
-	for _, item := range markers {
-		path, err := gitPathContext(ctx, repo, item.path)
-		if err != nil {
-			return nil, err
+	for index, item := range markers {
+		path := paths[index]
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(repo, path)
 		}
+		path = filepath.Clean(path)
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
 			continue
@@ -148,16 +162,4 @@ func ActiveOperationsContext(ctx context.Context, repo string) ([]ActiveOperatio
 		operations = append(operations, item.kind)
 	}
 	return operations, nil
-}
-
-func gitPathContext(ctx context.Context, repo, name string) (string, error) {
-	out, err := runContext(ctx, repo, "rev-parse", "--path-format=absolute", "--git-path", name)
-	if err != nil {
-		return "", err
-	}
-	path := strings.TrimSpace(out)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(repo, path)
-	}
-	return filepath.Clean(path), nil
 }

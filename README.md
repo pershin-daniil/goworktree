@@ -3,13 +3,16 @@
 Personal CLI for managing one **Work** as a group of Git worktrees across
 multiple repositories.
 
-Running `goworktree` with no arguments opens the new read-only Works dashboard.
-It reconciles manifests, operation records, filesystem state, local branches,
-worktree registrations, working changes, and active Git operations. Inspection
-does not fetch, prune, repair, or otherwise mutate repositories.
+Running `goworktree` with no arguments opens the Works dashboard. Its default
+inspection reconciles manifests, operation records, filesystem state, local
+branches, worktree registrations, working changes, and active Git operations
+without mutation or fetch. `n` starts the typed New Work flow; `:` opens actions
+for the current context. New Work fetches only while building an online plan and
+does not create branches or worktrees until that exact plan is confirmed.
 
-The legacy explicit commands remain available while mutating workflows are
-migrated to the new typed core.
+The dashboard can create/resume New Work and open a Work in configured programs.
+Sync, Repair, and Remove remain visible but disabled until their typed workflows
+replace the legacy explicit commands.
 
 Repo: [github.com/pershin-daniil/goworktree](https://github.com/pershin-daniil/goworktree)
 
@@ -31,7 +34,7 @@ Requires: **Go 1.23+**, **git**, and optionally any program that can open a fold
 
 ```bash
 goworktree init                 # TUI: paths + scan repos_root
-goworktree                      # read-only Works dashboard (vim keys)
+goworktree                      # Works dashboard, New Work, and scoped actions
 goworktree start EVOVPC-2855 --repos api,web # create / resume project group
 goworktree list
 goworktree sync EVOVPC-2855     # rebase project branches onto origin bases
@@ -65,7 +68,7 @@ task doctor
 
 | Command | Description |
 |---------|-------------|
-| *(no args)* | Inspect Works, repositories, local changes, and recovery state |
+| *(no args)* | Inspect Works, create/resume New Work, and open scoped actions |
 | `init` | First-time setup + repo scan |
 | `start <name> --repos id,id [--open]` | Create or resume a project |
 | `add <project> --repos id,id` | Add repos to a project |
@@ -93,9 +96,13 @@ task doctor
 | `Ctrl+u` / `Ctrl+d` | page up / down |
 | `/` | filter |
 | `r` | reinspect local state |
+| `n` | New Work from the Works home |
+| `:` | scoped action palette |
+| `Space` | toggle repository selection during New Work |
+| `m` | switch New Work between online/offline planning |
 | `Esc` | back |
 | `q` | quit |
-| `Ctrl+C` | hard quit |
+| `Ctrl+C` | request operation cancellation; quit outside operations |
 
 The minimum supported terminal size is `80×24`. `unknown` is displayed when a
 fact could not be inspected; it is never collapsed into a healthy default.

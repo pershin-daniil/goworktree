@@ -8,10 +8,12 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/work"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
+	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
 func TestWorkAppNavigatesHomeWorkAndRepository(t *testing.T) {
@@ -51,6 +53,201 @@ func TestWorkAppNavigatesHomeWorkAndRepository(t *testing.T) {
 	model = updated.(workAppModel)
 	if model.screen != workOverview {
 		t.Fatalf("h returned to screen %v", model.screen)
+	}
+}
+
+func TestWorkAppProblemViewFitsTerminalAndReturnsToWork(t *testing.T) {
+	t.Parallel()
+
+	snapshot := testWorksSnapshot("ticket-42")
+	snapshot.Works[0].Snapshot.Problems = []inspectwork.Problem{{
+		Code:    inspectwork.ProblemOperationMissing,
+		Message: "New Work operation record is missing",
+		Path:    "/config/operations/new-work/ticket-42.json",
+		Next:    inspectwork.ActionRepairWork,
+	}}
+	model := newWorkAppModel(WorkAppActions{Load: func(context.Context) (inspectworks.Snapshot, error) {
+		return snapshot, nil
+	}}, context.Background(), nil)
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: minimumWorkAppWidth, Height: minimumWorkAppHeight})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(worksLoadedMsg{generation: 1, snapshot: snapshot})
+	model = updated.(workAppModel)
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workProblem {
+		t.Fatalf("screen = %v, want problem", model.screen)
+	}
+	view := model.View()
+	if got := lipgloss.Height(view); got >= model.height {
+		t.Fatalf("problem view height = %d leaves no terminal row for stable rendering at height %d:\n%s", got, model.height, view)
+	}
+	if !strings.Contains(view, "Read-only problem details") || !strings.Contains(view, "h/esc back") || !strings.Contains(view, "q quit") {
+		t.Fatalf("problem view does not expose navigation:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(workAppModel)
+	if model.screen != workOverview {
+		t.Fatalf("esc returned to screen %v", model.screen)
+	}
+}
+
+func TestWorkAppActionPaletteOpensWorkInConfiguredProgram(t *testing.T) {
+	t.Parallel()
+
+	snapshot := testWorksSnapshot("ticket-42")
+	var request WorkOpenRequest
+	model := newWorkAppModel(WorkAppActions{
+		Load:     func(context.Context) (inspectworks.Snapshot, error) { return snapshot, nil },
+		Programs: []WorkProgramOption{{ID: "cursor", Name: "Cursor", Default: true}},
+		OpenWork: func(_ context.Context, value WorkOpenRequest) error {
+			request = value
+			return nil
+		},
+	}, context.Background(), nil)
+	model.snapshot = snapshot
+	model.setHome("")
+	model.activateListItem()
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	model = updated.(workAppModel)
+	if model.screen != workActions {
+		t.Fatalf("screen = %v, want actions", model.screen)
+	}
+	view := model.View()
+	for _, wanted := range []string{"Open Work · Cursor", "Sync Work", "unavailable", "Remove Work"} {
+		if !strings.Contains(view, wanted) {
+			t.Fatalf("action palette missing %q:\n%s", wanted, view)
+		}
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workOperation || cmd == nil {
+		t.Fatalf("Open Work did not start: screen=%v cmd=%v", model.screen, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workActionResult || !strings.Contains(model.View(), "Work opened") {
+		t.Fatalf("Open Work result:\n%s", model.View())
+	}
+	if request.WorkName != "ticket-42" || request.WorkRoot != "/works/ticket-42" || request.Program != "cursor" {
+		t.Fatalf("Open Work request = %+v", request)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workOverview {
+		t.Fatalf("Open Work result returned to screen %v", model.screen)
+	}
+}
+
+func TestWorkAppCompletesNewWorkInputPlanAndExecutionFlow(t *testing.T) {
+	t.Parallel()
+
+	snapshot := testWorksSnapshot("existing-work")
+	workName, _ := work.ParseName("ticket-99")
+	plan := newwork.Plan{
+		WorkName: workName, WorkRoot: "/works/ticket-99", Mode: newwork.ModeOffline, NoRemoteMutation: true,
+		Repositories: []newwork.RepositoryPlan{{
+			ID: "api", BaseRef: "refs/heads/main", BaseOID: strings.Repeat("b", 40),
+			TargetBranchRef: "refs/heads/ticket-99", Destination: "/works/ticket-99/api", IncludeInGoWork: true,
+		}},
+	}
+	var plannedRequest newwork.Request
+	var executedPlan newwork.Plan
+	model := newWorkAppModel(WorkAppActions{
+		Load:         func(context.Context) (inspectworks.Snapshot, error) { return snapshot, nil },
+		Repositories: []WorkRepositoryOption{{ID: "api", Name: "API", Path: "/repos/api"}},
+		PlanNewWork: func(_ context.Context, request newwork.Request) (newwork.Plan, error) {
+			plannedRequest = request
+			return plan, nil
+		},
+		CreateNewWork: func(_ context.Context, value newwork.Plan) (newwork.ExecutionResult, error) {
+			executedPlan = value
+			return newwork.ExecutionResult{
+				Status: newwork.ExecutionCreated, WorkRoot: value.WorkRoot,
+				VerifiedRepositories: []string{"api"},
+			}, nil
+		},
+	}, context.Background(), nil)
+	model.snapshot = snapshot
+	model.setHome("")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	model = updated.(workAppModel)
+	if model.screen != workNewName {
+		t.Fatalf("n opened screen %v", model.screen)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ticket-99")})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workNewRepositories {
+		t.Fatalf("name continued to screen %v", model.screen)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	model = updated.(workAppModel)
+	if model.newWorkMode != newwork.ModeOffline {
+		t.Fatalf("mode = %s, want offline", model.newWorkMode)
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workOperation || cmd == nil {
+		t.Fatalf("planning did not start: screen=%v cmd=%v", model.screen, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workNewPlan || !strings.Contains(model.View(), "Remote mutation") || !strings.Contains(model.View(), "refs/heads/ticket-99") {
+		t.Fatalf("plan view:\n%s", model.View())
+	}
+	if plannedRequest.Name != "ticket-99" || plannedRequest.Mode != newwork.ModeOffline || strings.Join(plannedRequest.RepositoryIDs, ",") != "api" {
+		t.Fatalf("planning request = %+v", plannedRequest)
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workOperation || cmd == nil {
+		t.Fatalf("creation did not start: screen=%v cmd=%v", model.screen, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workActionResult || !strings.Contains(model.View(), "Work created") || !strings.Contains(model.View(), "api") {
+		t.Fatalf("creation result:\n%s", model.View())
+	}
+	if executedPlan.WorkName.String() != "ticket-99" {
+		t.Fatalf("executed plan = %+v", executedPlan)
+	}
+}
+
+func TestWorkAppCtrlCCancelsOperationWithoutQuitting(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := newWorkAppModel(WorkAppActions{}, ctx, cancel)
+	operationCtx, operationCancel := context.WithCancel(ctx)
+	model.screen = workOperation
+	model.operationCancel = operationCancel
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(workAppModel)
+	if cmd != nil || model.quitting || model.screen != workOperation || operationCtx.Err() != nil {
+		t.Fatalf("q changed running operation: cmd=%v quitting=%v screen=%v err=%v", cmd, model.quitting, model.screen, operationCtx.Err())
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model = updated.(workAppModel)
+	if cmd != nil || model.quitting || model.screen != workOperation {
+		t.Fatalf("Ctrl+C quit operation: cmd=%v quitting=%v screen=%v", cmd, model.quitting, model.screen)
+	}
+	if operationCtx.Err() != context.Canceled || !strings.Contains(model.operationMessage, "Cancellation requested") {
+		t.Fatalf("operation cancellation = %v, message=%q", operationCtx.Err(), model.operationMessage)
 	}
 }
 

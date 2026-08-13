@@ -4,11 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/pershin-daniil/goworktree/internal/config"
+	lockops "github.com/pershin-daniil/goworktree/internal/lock"
+	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
+	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
 func exitOnError(err error) {
@@ -27,7 +33,7 @@ const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		exitOnError(tui.RunWorkApp(tui.WorkAppActions{Version: version, Load: inspectConfiguredWorks}))
+		exitOnError(tui.RunWorkApp(configuredWorkAppActions()))
 		return
 	}
 
@@ -78,6 +84,128 @@ func main() {
 	}
 
 	exitOnError(err)
+}
+
+func configuredWorkAppActions() tui.WorkAppActions {
+	actions := tui.WorkAppActions{
+		Version: version, Load: inspectConfiguredWorks,
+		PlanNewWork: planConfiguredNewWork, CreateNewWork: createConfiguredNewWork,
+		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return actions
+	}
+	repositoryIDs := cfg.RepoNames()
+	sort.Strings(repositoryIDs)
+	for _, id := range repositoryIDs {
+		path, ok := cfg.RepoPath(id)
+		if !ok {
+			continue
+		}
+		actions.Repositories = append(actions.Repositories, tui.WorkRepositoryOption{
+			ID: id, Name: cfg.RepoAlias(id), Path: path,
+		})
+	}
+	for _, id := range cfg.EnabledPrograms() {
+		program, ok := cfg.Program(id)
+		if !ok {
+			continue
+		}
+		actions.Programs = append(actions.Programs, tui.WorkProgramOption{
+			ID: id, Name: program.Name, Default: id == cfg.DefaultProgram,
+		})
+	}
+	return actions
+}
+
+func planConfiguredNewWork(ctx context.Context, request newwork.Request) (newwork.Plan, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return newwork.Plan{}, err
+	}
+	catalog, err := newwork.CatalogFromConfig(cfg, request.RepositoryIDs)
+	if err != nil {
+		return newwork.Plan{}, err
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	locks := lockops.Set{Root: catalog.ControlRoot}
+	planner := newwork.Planner{
+		Git: newwork.SystemGit{}, Locker: newwork.FileRepositoryLocker{Set: locks},
+	}
+	return planner.Build(operationCtx, catalog, request)
+}
+
+func createConfiguredNewWork(ctx context.Context, plan newwork.Plan) (newwork.ExecutionResult, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return newwork.ExecutionResult{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return newwork.ExecutionResult{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	executor := configuredNewWorkExecutor(controlRoot)
+	return executor.Execute(operationCtx, plan)
+}
+
+func resumeConfiguredNewWork(ctx context.Context, operationRecordPath string) (newwork.ExecutionResult, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return newwork.ExecutionResult{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return newwork.ExecutionResult{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	executor := configuredNewWorkExecutor(controlRoot)
+	return executor.Resume(operationCtx, operationRecordPath)
+}
+
+func configuredNewWorkExecutor(controlRoot string) newwork.Executor {
+	return newwork.Executor{
+		Git: newwork.SystemGit{}, Locker: newwork.FileExecutionLocker{Set: lockops.Set{Root: controlRoot}},
+		Store: newwork.OperationStore{}, Harness: newwork.GoWorkHarness{},
+	}
+}
+
+func configuredOperationContext(ctx context.Context, cfg *config.Config) (context.Context, context.CancelFunc) {
+	timeout := time.Duration(cfg.CommandTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Duration(config.DefaultCommandTimeoutSeconds) * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func openConfiguredWork(ctx context.Context, request tui.WorkOpenRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	expectedRoot, err := project.Dir(cfg, request.WorkName)
+	if err != nil {
+		return err
+	}
+	expectedRoot, err = filepath.Abs(expectedRoot)
+	if err != nil {
+		return err
+	}
+	observedRoot, err := filepath.Abs(request.WorkRoot)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(expectedRoot) != filepath.Clean(observedRoot) {
+		return fmt.Errorf("Work root changed from %s to %s", expectedRoot, observedRoot)
+	}
+	return openProgram(cfg, request.Program, observedRoot)
 }
 
 func inspectConfiguredWorks(ctx context.Context) (inspectworks.Snapshot, error) {
@@ -204,7 +332,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `goworktree %s — git worktree helper for multi-repo projects
 
 usage:
-  goworktree                       read-only Works dashboard
+  goworktree                       Works dashboard, New Work, and scoped actions
   goworktree init
   goworktree start <name> --repos id,id [--open] create or resume project (open in default program)
   goworktree add <project> --repos id,id add repos to an existing project
@@ -223,7 +351,8 @@ usage:
   goworktree programs <list|add|update|delete|default|search>
 
 notes:
-  without arguments, goworktree inspects local Works without mutation or fetch
+  dashboard inspection does not mutate or fetch until an explicit action is selected
+  use n for New Work and : for the scoped action palette
   use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate the dashboard
   explicit commands never open pickers; pass required arguments and --repos
   start/add resume incomplete worktrees via .goworktree.json

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
@@ -31,6 +32,27 @@ type Inspector struct {
 	Git        Git
 	Operations OperationReader
 	Now        func() time.Time
+	Limiter    *RepositoryLimiter
+}
+
+// RepositoryLimiter bounds read-only repository inspections shared by one or
+// more concurrent Work inspections.
+type RepositoryLimiter struct {
+	tokens chan struct{}
+}
+
+// NewRepositoryLimiter creates a limiter with at least one available slot.
+func NewRepositoryLimiter(parallelism int) *RepositoryLimiter {
+	return &RepositoryLimiter{tokens: make(chan struct{}, max(1, parallelism))}
+}
+
+func (l *RepositoryLimiter) acquire(ctx context.Context) (func(), error) {
+	select {
+	case l.tokens <- struct{}{}:
+		return func() { <-l.tokens }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 type SystemGit struct{}
@@ -162,17 +184,57 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	default:
 		snapshot.IntentSource = IntentNone
 	}
-	for _, intent := range intents {
-		if err := ctx.Err(); err != nil {
-			return snapshot, err
-		}
-		repository := i.inspectRepository(ctx, intent, snapshot.IntentSource, snapshot.Operation.ResumeSuggested)
+	repositories, err := i.inspectRepositories(ctx, intents, snapshot.IntentSource, snapshot.Operation.ResumeSuggested)
+	for _, repository := range repositories {
 		snapshot.Repositories = append(snapshot.Repositories, repository)
 		snapshot.Problems = append(snapshot.Problems, repository.Problems...)
+	}
+	if err != nil {
+		return snapshot, err
 	}
 
 	i.inspectHarness(&snapshot, record, recordValid && (linked || !manifestValid))
 	return snapshot, nil
+}
+
+func (i Inspector) inspectRepositories(
+	ctx context.Context,
+	intents []work.RepositoryIntent,
+	source IntentSource,
+	resumeSuggested bool,
+) ([]RepositorySnapshot, error) {
+	if i.Limiter == nil || len(intents) < 2 {
+		results := make([]RepositorySnapshot, 0, len(intents))
+		for _, intent := range intents {
+			if err := ctx.Err(); err != nil {
+				return results, err
+			}
+			results = append(results, i.inspectRepository(ctx, intent, source, resumeSuggested))
+		}
+		return results, nil
+	}
+
+	results := make([]RepositorySnapshot, len(intents))
+	var inspections sync.WaitGroup
+	var contextErr error
+	for index := range intents {
+		release, err := i.Limiter.acquire(ctx)
+		if err != nil {
+			contextErr = err
+			break
+		}
+		inspections.Add(1)
+		go func() {
+			defer inspections.Done()
+			defer release()
+			results[index] = i.inspectRepository(ctx, intents[index], source, resumeSuggested)
+		}()
+	}
+	inspections.Wait()
+	if contextErr == nil {
+		contextErr = ctx.Err()
+	}
+	return results, contextErr
 }
 
 func (i Inspector) inspectManifest(snapshot *Snapshot) []work.RepositoryIntent {

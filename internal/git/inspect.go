@@ -66,18 +66,19 @@ func InspectRepositoryContext(ctx context.Context, path string) (RepositoryIdent
 	if err != nil {
 		return RepositoryIdentity{}, fmt.Errorf("canonical source path: %w", err)
 	}
-	inside, err := runContext(ctx, canonicalSource, "rev-parse", "--is-inside-work-tree")
+	out, err := runContext(ctx, canonicalSource,
+		"rev-parse", "--is-inside-work-tree", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return RepositoryIdentity{}, err
 	}
-	if strings.TrimSpace(inside) != "true" {
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		return RepositoryIdentity{}, fmt.Errorf("git returned %d repository identity fields, expected 2", len(lines))
+	}
+	if lines[0] != "true" {
 		return RepositoryIdentity{}, fmt.Errorf("%s is not a non-bare Git worktree", canonicalSource)
 	}
-	common, err := commonDirContext(ctx, canonicalSource)
-	if err != nil {
-		return RepositoryIdentity{}, err
-	}
-	canonicalCommon, err := canonicalExistingPath(common)
+	canonicalCommon, err := canonicalExistingPath(lines[1])
 	if err != nil {
 		return RepositoryIdentity{}, fmt.Errorf("canonical Git common directory: %w", err)
 	}
@@ -151,24 +152,20 @@ func LocalBranchOIDContext(ctx context.Context, repo, branch string) (string, bo
 	if !strings.HasPrefix(fullRef, "refs/heads/") {
 		fullRef = "refs/heads/" + fullRef
 	}
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", fullRef)
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", fullRef+"^{commit}")
 	cmd.Dir = repo
-	err := cmd.Run()
+	out, err := cmd.Output()
 	if err == nil {
-		oid, resolveErr := runContext(ctx, repo, "rev-parse", "--verify", fullRef+"^{commit}")
-		if resolveErr != nil {
-			return "", false, resolveErr
-		}
-		return strings.TrimSpace(oid), true, nil
+		return strings.TrimSpace(string(out)), true, nil
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
-		return "", false, fmt.Errorf("git show-ref --verify --quiet %s: %w", fullRef, contextErr)
+		return "", false, fmt.Errorf("git rev-parse --verify --quiet %s: %w", fullRef, contextErr)
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return "", false, nil
 	}
-	return "", false, fmt.Errorf("git show-ref --verify --quiet %s: %w", fullRef, err)
+	return "", false, fmt.Errorf("git rev-parse --verify --quiet %s: %w", fullRef, err)
 }
 
 func ListWorktreesContext(ctx context.Context, repo string) ([]WorktreeRegistration, error) {
@@ -331,18 +328,6 @@ func resolveFullRef(ctx context.Context, repo, ref string, source BaseSource) (R
 		return ResolvedBase{}, false, nil
 	}
 	return ResolvedBase{}, false, fmt.Errorf("git rev-parse --verify --quiet %s: %w", ref, err)
-}
-
-func commonDirContext(ctx context.Context, path string) (string, error) {
-	out, err := runContext(ctx, path, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return "", err
-	}
-	common := strings.TrimSpace(out)
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(path, common)
-	}
-	return filepath.Clean(common), nil
 }
 
 func canonicalExistingPath(path string) (string, error) {

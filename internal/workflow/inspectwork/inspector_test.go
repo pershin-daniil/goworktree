@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,6 +301,39 @@ func TestInspectRejectsEmptyRoots(t *testing.T) {
 		WorksRoot: t.TempDir(), Name: "inspect-empty-control-root",
 	}); err == nil || !strings.Contains(err.Error(), "control root is empty") {
 		t.Fatalf("empty control root error = %v", err)
+	}
+}
+
+func TestRepositoryLimiterBoundsConcurrentInspections(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewRepositoryLimiter(2)
+	var workers sync.WaitGroup
+	var state sync.Mutex
+	active := 0
+	maximum := 0
+	workers.Add(4)
+	for range 4 {
+		go func() {
+			defer workers.Done()
+			release, err := limiter.acquire(context.Background())
+			if err != nil {
+				return
+			}
+			state.Lock()
+			active++
+			maximum = max(maximum, active)
+			state.Unlock()
+			time.Sleep(20 * time.Millisecond)
+			state.Lock()
+			active--
+			state.Unlock()
+			release()
+		}()
+	}
+	workers.Wait()
+	if maximum != 2 {
+		t.Fatalf("maximum concurrent inspections = %d, want 2", maximum)
 	}
 }
 

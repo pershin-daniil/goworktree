@@ -8,12 +8,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pershin-daniil/goworktree/internal/work"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
+
+const systemInspectionParallelism = 8
 
 type WorkInspector interface {
 	Inspect(context.Context, inspectwork.Request) (inspectwork.Snapshot, error)
@@ -24,18 +27,22 @@ type OperationReader interface {
 }
 
 type Inspector struct {
-	Works      WorkInspector
-	Operations OperationReader
-	Now        func() time.Time
+	Works       WorkInspector
+	Operations  OperationReader
+	Now         func() time.Time
+	Parallelism int
 }
 
 func NewSystemInspector() Inspector {
+	limiter := inspectwork.NewRepositoryLimiter(systemInspectionParallelism)
 	return Inspector{
 		Works: inspectwork.Inspector{
 			Git:        inspectwork.SystemGit{},
 			Operations: inspectwork.SystemOperationReader{},
+			Limiter:    limiter,
 		},
-		Operations: inspectwork.SystemOperationReader{},
+		Operations:  inspectwork.SystemOperationReader{},
+		Parallelism: systemInspectionParallelism,
 	}
 }
 
@@ -83,29 +90,65 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		if err := ctx.Err(); err != nil {
-			return snapshot, err
-		}
-		entry := candidates[name]
-		if _, err := work.ParseName(name); err != nil {
-			snapshot.Works = append(snapshot.Works, *entry)
-			continue
-		}
-		observed, inspectErr := i.Works.Inspect(ctx, inspectwork.Request{
-			WorksRoot: worksRoot, ControlRoot: controlRoot, Name: name,
-		})
-		if inspectErr != nil {
-			entry.Problems = append(entry.Problems, Problem{
-				Code: ProblemWorkInspectionFailed, Name: name, Path: entry.RootPath,
-				Message: inspectErr.Error(),
-			})
-		} else {
-			entry.Snapshot = &observed
-		}
-		snapshot.Works = append(snapshot.Works, *entry)
+	works, err := i.inspectCandidates(ctx, worksRoot, controlRoot, names, candidates)
+	snapshot.Works = works
+	if err != nil {
+		return snapshot, err
 	}
 	return snapshot, nil
+}
+
+func (i Inspector) inspectCandidates(
+	ctx context.Context,
+	worksRoot string,
+	controlRoot string,
+	names []string,
+	candidates map[string]*Work,
+) ([]Work, error) {
+	results := make([]Work, len(names))
+	for index, name := range names {
+		results[index] = *candidates[name]
+	}
+
+	limit := make(chan struct{}, max(1, i.Parallelism))
+	var inspections sync.WaitGroup
+	var contextErr error
+	for index, name := range names {
+		if _, parseErr := work.ParseName(name); parseErr != nil {
+			continue
+		}
+		select {
+		case limit <- struct{}{}:
+		case <-ctx.Done():
+			contextErr = ctx.Err()
+		}
+		if contextErr != nil {
+			break
+		}
+		inspections.Add(1)
+		go func() {
+			defer inspections.Done()
+			defer func() { <-limit }()
+			entry := results[index]
+			observed, inspectErr := i.Works.Inspect(ctx, inspectwork.Request{
+				WorksRoot: worksRoot, ControlRoot: controlRoot, Name: name,
+			})
+			if inspectErr != nil {
+				entry.Problems = append(entry.Problems, Problem{
+					Code: ProblemWorkInspectionFailed, Name: name, Path: entry.RootPath,
+					Message: inspectErr.Error(),
+				})
+			} else {
+				entry.Snapshot = &observed
+			}
+			results[index] = entry
+		}()
+	}
+	inspections.Wait()
+	if contextErr == nil {
+		contextErr = ctx.Err()
+	}
+	return results, contextErr
 }
 
 func (i Inspector) discoverDirectories(snapshot *Snapshot, candidates map[string]*Work) {

@@ -10,22 +10,49 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
+	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
 const (
 	minimumWorkAppWidth  = 80
 	minimumWorkAppHeight = 24
+	detailViewportChrome = 8
 )
 
 type WorkAppActions struct {
-	Version string
-	Load    func(context.Context) (inspectworks.Snapshot, error)
+	Version       string
+	Load          func(context.Context) (inspectworks.Snapshot, error)
+	Repositories  []WorkRepositoryOption
+	Programs      []WorkProgramOption
+	PlanNewWork   func(context.Context, newwork.Request) (newwork.Plan, error)
+	CreateNewWork func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
+	ResumeNewWork func(context.Context, string) (newwork.ExecutionResult, error)
+	OpenWork      func(context.Context, WorkOpenRequest) error
+}
+
+type WorkRepositoryOption struct {
+	ID   string
+	Name string
+	Path string
+}
+
+type WorkProgramOption struct {
+	ID      string
+	Name    string
+	Default bool
+}
+
+type WorkOpenRequest struct {
+	WorkName string
+	WorkRoot string
+	Program  string
 }
 
 type workScreen int
@@ -37,6 +64,12 @@ const (
 	workRepository
 	workProblem
 	workLoadError
+	workActions
+	workNewName
+	workNewRepositories
+	workNewPlan
+	workOperation
+	workActionResult
 )
 
 type workItemKind int
@@ -46,14 +79,17 @@ const (
 	workItemRepository
 	workItemProblem
 	workItemCollectionProblem
+	workItemAction
+	workItemNewRepository
 )
 
 type workItem struct {
-	kind  workItemKind
-	index int
-	id    string
-	title string
-	desc  string
+	kind          workItemKind
+	index         int
+	id            string
+	title         string
+	desc          string
+	blockedReason string
 }
 
 func (i workItem) FilterValue() string { return terminalSafe(i.title+" "+i.desc, false) }
@@ -63,6 +99,24 @@ func (i workItem) Description() string { return terminalSafe(i.desc, false) }
 type worksLoadedMsg struct {
 	generation uint64
 	snapshot   inspectworks.Snapshot
+	err        error
+}
+
+type newWorkPlannedMsg struct {
+	generation uint64
+	plan       newwork.Plan
+	err        error
+}
+
+type newWorkCreatedMsg struct {
+	generation uint64
+	result     newwork.ExecutionResult
+	err        error
+}
+
+type workOpenedMsg struct {
+	generation uint64
+	program    string
 	err        error
 }
 
@@ -83,6 +137,19 @@ type workAppModel struct {
 	selectedWork     int
 	detailTitle      string
 	detailContent    string
+	input            textinput.Model
+	actionReturn     workScreen
+	actionNotice     string
+	selectedNewRepos map[string]bool
+	newWorkMode      newwork.Mode
+	newWorkPlan      newwork.Plan
+	operationCancel  context.CancelFunc
+	operationID      uint64
+	operationTitle   string
+	operationMessage string
+	operationKind    string
+	resultReturn     workScreen
+	resultRefresh    bool
 	quitting         bool
 }
 
@@ -98,11 +165,17 @@ func RunWorkApp(actions WorkAppActions) error {
 }
 
 func newWorkAppModel(actions WorkAppActions, ctx context.Context, cancel context.CancelFunc) workAppModel {
+	input := textinput.New()
+	input.Placeholder = "EVOVPC-1234-short-description"
+	input.Prompt = "› "
+	input.CharLimit = 128
+	input.Width = 56
 	model := workAppModel{
 		actions: actions, ctx: ctx, cancel: cancel, screen: workLoading,
 		restoreScreen: workHome, width: minimumWorkAppWidth, height: minimumWorkAppHeight,
+		input: input, selectedNewRepos: make(map[string]bool), newWorkMode: newwork.ModeOnline,
 	}
-	model.viewport = viewport.New(minimumWorkAppWidth-4, minimumWorkAppHeight-6)
+	model.viewport = viewport.New(minimumWorkAppWidth-4, minimumWorkAppHeight-detailViewportChrome)
 	model.generation = 1
 	return model
 }
@@ -136,15 +209,28 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snapshot = msg.snapshot
 		m.restoreAfterLoad()
 		return m, nil
+	case newWorkPlannedMsg:
+		return m.handleNewWorkPlanned(msg)
+	case newWorkCreatedMsg:
+		return m.handleNewWorkCreated(msg)
+	case workOpenedMsg:
+		return m.handleWorkOpened(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
+			if m.screen == workOperation {
+				if m.operationCancel != nil {
+					m.operationCancel()
+					m.operationMessage = "Cancellation requested; waiting for the current safe boundary…"
+				}
+				return m, nil
+			}
 			m.cancelLoad()
 			m.quitting = true
 			return m, tea.Quit
 		}
 		if m.tooSmall() {
-			if key == "q" {
+			if key == "q" && m.screen != workOperation {
 				m.cancelLoad()
 				m.quitting = true
 				return m, tea.Quit
@@ -159,12 +245,32 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if (m.screen == workHome || m.screen == workOverview) && m.list.FilterState() == list.Filtering {
+		if m.screen == workNewName {
+			return m.updateNewWorkName(msg)
+		}
+		if m.screen == workOperation {
+			return m, nil
+		}
+		if m.screen == workNewPlan {
+			return m.updateNewWorkPlan(msg)
+		}
+		if m.screen == workActionResult {
+			return m.updateActionResult(msg)
+		}
+		if m.isListScreen() && m.list.FilterState() == list.Filtering {
 			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(msg)
 			return m, cmd
 		}
-		if key == "r" {
+		if key == ":" && m.canOpenActions() {
+			m.openActionPalette()
+			return m, nil
+		}
+		if key == "n" && m.screen == workHome {
+			m.beginNewWork()
+			return m, nil
+		}
+		if key == "r" && m.canRefresh() {
 			return m.beginRefresh()
 		}
 		if key == "q" {
@@ -174,6 +280,12 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workRepository || m.screen == workProblem || m.screen == workLoadError {
 			return m.updateDetail(msg)
+		}
+		if m.screen == workActions {
+			return m.updateActionPalette(msg)
+		}
+		if m.screen == workNewRepositories {
+			return m.updateNewWorkRepositories(msg)
 		}
 		if m.list.FilterState() != list.Filtering {
 			switch key {
@@ -189,7 +301,7 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.screen == workHome || m.screen == workOverview {
+	if m.isListScreen() {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
@@ -438,11 +550,12 @@ func (m *workAppModel) setDetail(title, content string) {
 
 func (m *workAppModel) resize() {
 	listHeight := max(8, m.height-8)
-	if m.screen == workHome || m.screen == workOverview {
+	if m.isListScreen() {
 		m.list.SetSize(max(40, m.width), listHeight)
 	}
+	m.input.Width = min(72, max(20, m.width-6))
 	m.viewport.Width = max(40, m.width-4)
-	m.viewport.Height = max(8, m.height-6)
+	m.viewport.Height = max(8, m.height-detailViewportChrome)
 	if m.detailContent != "" {
 		offset := m.viewport.YOffset
 		m.viewport.SetContent(m.renderDetailContent())
@@ -473,16 +586,39 @@ func (m workAppModel) View() string {
 		if len(m.snapshot.Problems) > 0 {
 			contextLine += fmt.Sprintf(" · %d inspection issues", len(m.snapshot.Problems))
 		}
-		return m.listView("Works", contextLine, "j/k move  l/enter open  / search  r refresh  q quit")
+		return m.listView("Works", contextLine, "j/k move  l/enter open  n new  : actions  / search  r refresh  q quit")
 	case workOverview:
 		entry := m.currentWork()
 		contextLine := ""
 		if entry != nil {
 			contextLine = workContext(*entry)
 		}
-		return m.listView("Work · "+m.selectedWorkName, contextLine, "j/k move  l/enter open  h back  / search  r refresh  q quit")
+		return m.listView("Work · "+m.selectedWorkName, contextLine, "j/k move  l/enter open  h back  : actions  / search  r refresh  q quit")
 	case workRepository, workProblem:
-		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  h back  r refresh  q quit")
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  h/esc back  : actions  r refresh  q quit")
+	case workActions:
+		contextLine := "Home actions"
+		if m.selectedWorkName != "" && m.actionReturn != workHome {
+			contextLine = "Work · " + m.selectedWorkName
+		}
+		if m.actionNotice != "" {
+			contextLine += " · " + m.actionNotice
+		}
+		return m.listView("Actions", contextLine, "j/k move  l/enter select  h/esc close  / search  q quit")
+	case workNewName:
+		return m.newWorkNameView()
+	case workNewRepositories:
+		contextLine := fmt.Sprintf("Work · %s · mode %s · %d selected", m.input.Value(), m.newWorkMode, len(m.selectedRepositoryIDs()))
+		if m.actionNotice != "" {
+			contextLine += " · " + m.actionNotice
+		}
+		return m.listView("New Work · repositories", contextLine, "space toggle  m mode  enter plan  h/esc back  / search  q quit")
+	case workNewPlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/c create  h/esc back  q quit")
+	case workOperation:
+		return m.operationView()
+	case workActionResult:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/h/esc back  q quit")
 	default:
 		return ""
 	}
@@ -493,7 +629,32 @@ func (m workAppModel) listView(title, contextLine, hint string) string {
 }
 
 func (m workAppModel) detailView(hint string) string {
-	return Title(m.detailTitle) + "\n" + m.viewport.View() + "\n" + hintStyle.Render(hint)
+	subtitle := "Read-only details"
+	switch m.screen {
+	case workProblem:
+		subtitle = "Read-only problem details"
+	case workRepository:
+		subtitle = "Observed Git and filesystem state"
+	case workLoadError:
+		subtitle = "Inspection did not complete"
+	case workNewPlan:
+		subtitle = "Review the exact mutation plan"
+	case workActionResult:
+		subtitle = "Operation result"
+	}
+	return Title(m.detailTitle) + "\n" + subtitleStyle.Render(subtitle) + "\n\n" + m.viewport.View() + "\n" + hintStyle.Render(hint)
+}
+
+func (m workAppModel) newWorkNameView() string {
+	message := "The same exact name is used for the Work directory and every local branch."
+	if m.actionNotice != "" {
+		message = m.actionNotice
+	}
+	return Title("New Work · name") + "\n" + subtitleStyle.Render(message) + "\n\n" + m.input.View() + "\n\n" + hintStyle.Render("enter continue  esc cancel")
+}
+
+func (m workAppModel) operationView() string {
+	return Title(terminalSafe(m.operationTitle, false)) + "\n" + subtitleStyle.Render("Operation running") + "\n\n" + terminalSafe(m.operationMessage, true) + "\n\n" + hintStyle.Render("ctrl+c request cancellation")
 }
 
 func (m workAppModel) tooSmall() bool {

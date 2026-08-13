@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,9 +131,59 @@ func TestInspectOneFailureDoesNotHideOtherWorks(t *testing.T) {
 	}
 }
 
+func TestInspectBoundsParallelWorkChecksAndPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	controlRoot := t.TempDir()
+	for _, name := range []string{"work-d", "work-b", "work-a", "work-c"} {
+		mustMkdir(t, filepath.Join(worksRoot, name))
+	}
+	fakeWorks := &concurrentWorkInspector{delay: 20 * time.Millisecond}
+	inspector := Inspector{
+		Works: fakeWorks, Operations: fakeOperationReader{}, Parallelism: 2,
+	}
+	snapshot, err := inspector.Inspect(context.Background(), Request{WorksRoot: worksRoot, ControlRoot: controlRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := workNames(snapshot.Works), "work-a,work-b,work-c,work-d"; got != want {
+		t.Fatalf("Work order = %q, want %q", got, want)
+	}
+	if got := fakeWorks.maximum(); got != 2 {
+		t.Fatalf("maximum parallel Work checks = %d, want 2", got)
+	}
+}
+
 type fakeWorkInspector struct {
 	requests []inspectwork.Request
 	failures map[string]error
+}
+
+type concurrentWorkInspector struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	delay     time.Duration
+}
+
+func (f *concurrentWorkInspector) Inspect(_ context.Context, request inspectwork.Request) (inspectwork.Snapshot, error) {
+	f.mu.Lock()
+	f.active++
+	f.maxActive = max(f.maxActive, f.active)
+	f.mu.Unlock()
+	time.Sleep(f.delay)
+	f.mu.Lock()
+	f.active--
+	f.mu.Unlock()
+	name, _ := work.ParseName(request.Name)
+	return inspectwork.Snapshot{WorkName: name, WorkRoot: filepath.Join(request.WorksRoot, request.Name)}, nil
+}
+
+func (f *concurrentWorkInspector) maximum() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
 }
 
 func (f *fakeWorkInspector) Inspect(_ context.Context, request inspectwork.Request) (inspectwork.Snapshot, error) {
