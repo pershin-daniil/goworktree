@@ -116,6 +116,7 @@ fact could not be inspected; it is never collapsed into a healthy default.
     "goland": {"name": "GoLand", "path": "goland", "enabled": true}
   },
   "default_program": "cursor",
+  "conflict_program": "goland",
   "repos_root": "/Users/you/Projects",
   "projects_root": "/Users/you/Projects/worktrees",
   "default_branch": "main",
@@ -143,6 +144,13 @@ goworktree programs delete vscode
 ```
 
 `search` lists executable files from `PATH`; `add` and `update` require a runnable executable path or a command resolvable from `PATH`. Programs receive the project folder as their final argument. For macOS apps that need LaunchServices, use arguments, for example: `goworktree programs update codex-id-1 --path open --args "-a Codex"`.
+
+`conflict_program` selects the program opened automatically at the exact
+repository when Sync leaves a rebase conflict. When omitted, it follows
+`default_program`. Configure it with `goworktree config set conflict_program
+goland`, `goworktree config set conflict_program codex-id-1`, or use `default`
+to follow the default program again. The same setting is available as
+`Conflict resolver` in the dashboard `:` action palette.
 
 ## Development
 

@@ -38,6 +38,7 @@ const (
 	appPickRepos
 	appPickBranchRepo
 	appPickDefaultProgram
+	appPickConflictProgram
 	appPrograms
 	appProgramActions
 	appProgramForm
@@ -208,6 +209,7 @@ func (m *appModel) setSettings() {
 		items = append(items,
 			appItem{"open_with", "Open with", fmt.Sprintf("%d configured programs", len(m.cfg.OpenWith))},
 			appItem{"default_program", "Default program", programLabel(m.cfg, m.cfg.DefaultProgram)},
+			appItem{"conflict_program", "Conflict resolver", conflictProgramLabel(m.cfg)},
 			appItem{"repos_root", "Repositories root", m.cfg.ReposRoot},
 			appItem{"projects_root", "Projects root", m.cfg.ProjectsRoot},
 			appItem{"default_branch", "Default branch", m.cfg.DefaultBranch},
@@ -246,6 +248,16 @@ func (m *appModel) setDefaultProgramPicker() {
 	m.screen = appPickDefaultProgram
 }
 
+func (m *appModel) setConflictProgramPicker() {
+	items := []list.Item{appItem{"follow-default", "Follow default", programLabel(m.cfg, m.cfg.DefaultProgram)}}
+	for _, id := range m.cfg.EnabledPrograms() {
+		p, _ := m.cfg.Program(id)
+		items = append(items, appItem{id, p.Name, p.Path})
+	}
+	m.setList("Conflict resolver", items)
+	m.screen = appPickConflictProgram
+}
+
 func (m *appModel) setPrograms() {
 	items := []list.Item{appItem{"add", "Add program", "Add an executable to Open with"}, appItem{"default", "Choose default", "Select the default enabled program"}, appItem{"back", "Back", "Return to settings"}}
 	for _, id := range m.cfg.ProgramIDs() {
@@ -256,6 +268,9 @@ func (m *appModel) setPrograms() {
 		}
 		if m.cfg.DefaultProgram == id {
 			state += " · default"
+		}
+		if m.cfg.ConflictProgram == id {
+			state += " · conflict resolver"
 		}
 		command := strings.TrimSpace(p.Path + " " + strings.Join(p.Args, " "))
 		items = append(items, appItem{"program:" + id, p.Name, id + " · " + command + " · " + state})
@@ -269,7 +284,8 @@ func (m *appModel) setProgramActions() {
 	items := []list.Item{
 		appItem{"edit", "Edit", p.Name + " · " + strings.TrimSpace(p.Path+" "+strings.Join(p.Args, " "))},
 		appItem{"toggle", "Toggle enabled", enabledLabel(p.Enabled)},
-		appItem{"default", "Set default", "Use this program for open and conflicts"},
+		appItem{"default", "Set default", "Use this program when opening a Work"},
+		appItem{"conflict", "Set conflict resolver", "Open this program automatically for Sync conflicts"},
 		appItem{"delete", "Delete", "Remove this program"},
 		appItem{"back", "Back", "Return to Open with"},
 	}
@@ -504,6 +520,26 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.screen == appPickConflictProgram && m.list.FilterState() != list.Filtering {
+			if msg.String() == "esc" || msg.String() == "q" {
+				m.setSettings()
+				return m, nil
+			}
+			if msg.String() == "enter" {
+				if it, ok := m.list.SelectedItem().(appItem); ok {
+					m.cfg.ConflictProgram = it.id
+					if it.id == "follow-default" {
+						m.cfg.ConflictProgram = ""
+					}
+					if err := m.cfg.Save(); err != nil {
+						m.err, m.message, m.screen = err, "could not save conflict resolver", appResult
+						return m, nil
+					}
+					m.setSettings()
+				}
+				return m, nil
+			}
+		}
 		if (m.screen == appDashboard || m.screen == appProjectActions || m.screen == appSettings || m.screen == appRepositories || m.screen == appPrograms || m.screen == appProgramActions) && m.list.FilterState() != list.Filtering {
 			if msg.String() == "esc" && m.screen == appProjectActions {
 				m.setDashboard()
@@ -594,6 +630,14 @@ func (m *appModel) activate() tea.Cmd {
 			m.setDefaultProgramPicker()
 			return nil
 		}
+		if it.id == "conflict_program" {
+			if len(m.cfg.EnabledPrograms()) == 0 {
+				m.err, m.message, m.screen = fmt.Errorf("enable a program before choosing a conflict resolver"), "no programs enabled", appResult
+				return nil
+			}
+			m.setConflictProgramPicker()
+			return nil
+		}
 		if it.id == "open_with" {
 			m.setPrograms()
 			return nil
@@ -631,6 +675,9 @@ func (m *appModel) activate() tea.Cmd {
 			return m.command()
 		case "default":
 			m.start("programs", "default", m.programID)
+			return m.command()
+		case "conflict":
+			m.start("config", "set", "conflict_program", m.programID)
 			return m.command()
 		case "delete":
 			m.message = "Delete program " + m.programID + "?"

@@ -30,6 +30,7 @@ type Program struct {
 type Config struct {
 	OpenWith              map[string]Program `json:"open_with"`
 	DefaultProgram        string             `json:"default_program"`
+	ConflictProgram       string             `json:"conflict_program,omitempty"`
 	ReposRoot             string             `json:"repos_root"`
 	ProjectsRoot          string             `json:"projects_root"`
 	DefaultBranch         string             `json:"default_branch"`
@@ -182,6 +183,15 @@ func (c *Config) ProgramEnabled(program string) bool {
 	return ok && p.Enabled
 }
 
+// EffectiveConflictProgram returns the explicitly configured conflict
+// resolver when it is enabled, otherwise conflicts follow the default program.
+func (c *Config) EffectiveConflictProgram() string {
+	if c.ProgramEnabled(c.ConflictProgram) {
+		return c.ConflictProgram
+	}
+	return c.DefaultProgram
+}
+
 func (c *Config) Program(id string) (Program, bool) { p, ok := c.OpenWith[id]; return p, ok }
 
 func (c *Config) ProgramIDs() []string {
@@ -233,6 +243,11 @@ func ValidateProgramPath(path string) error {
 // NormalizePrograms keeps the selected default usable after a setting change.
 // An empty default is permitted only when every program is disabled.
 func (c *Config) NormalizePrograms() {
+	if c.ConflictProgram != "" {
+		if _, exists := c.OpenWith[c.ConflictProgram]; !exists {
+			c.ConflictProgram = ""
+		}
+	}
 	if c.ProgramEnabled(c.DefaultProgram) {
 		return
 	}

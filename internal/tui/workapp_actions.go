@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
@@ -16,18 +17,20 @@ import (
 )
 
 const (
-	actionNewWork = "new-work"
-	actionRefresh = "refresh"
-	actionResume  = "resume-new-work"
-	actionSync    = "sync-work"
-	actionRepair  = "repair-work"
-	actionRemove  = "remove-work"
-	openPrefix    = "open:"
+	actionNewWork         = "new-work"
+	actionRefresh         = "refresh"
+	actionResume          = "resume-new-work"
+	actionSync            = "sync-work"
+	actionRepair          = "repair-work"
+	actionRemove          = "remove-work"
+	actionConflictProgram = "conflict-program"
+	openPrefix            = "open:"
+	conflictProgramPrefix = "conflict-program:"
 )
 
 func (m workAppModel) isListScreen() bool {
 	switch m.screen {
-	case workHome, workOverview, workActions, workNewRepositories:
+	case workHome, workOverview, workActions, workConflictProgram, workNewRepositories:
 		return true
 	default:
 		return false
@@ -106,7 +109,24 @@ func (m *workAppModel) openActionPalette() {
 			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", removeBlocked},
 		)
 	}
-	items = append(items, listItem{actionRefresh, "Refresh", "Reinspect Git and filesystem state", ""})
+	resolver := "follows default"
+	if m.actions.ConflictProgram != "" {
+		resolver = m.actions.ConflictProgram
+		for _, program := range m.actions.Programs {
+			if program.ID == m.actions.ConflictProgram {
+				resolver = program.Name
+				break
+			}
+		}
+	}
+	resolverBlocked := ""
+	if m.actions.SetConflictProgram == nil || len(m.actions.Programs) == 0 {
+		resolverBlocked = "no enabled configurable programs"
+	}
+	items = append(items,
+		listItem{actionConflictProgram, "Conflict resolver · " + resolver, "Choose what opens for Sync conflicts", resolverBlocked},
+		listItem{actionRefresh, "Refresh", "Reinspect Git and filesystem state", ""},
+	)
 
 	listItems := make([]list.Item, 0, len(items))
 	for _, item := range items {
@@ -169,6 +189,9 @@ func (m workAppModel) activateAction() (tea.Model, tea.Cmd) {
 		return m.startRemoveWorkPlanning()
 	case item.id == actionRepair:
 		return m.startRepairWorkPlanning()
+	case item.id == actionConflictProgram:
+		m.openConflictProgramPicker()
+		return m, nil
 	case strings.HasPrefix(item.id, openPrefix):
 		return m.startOpenWork(strings.TrimPrefix(item.id, openPrefix))
 	default:
@@ -190,6 +213,87 @@ func (m *workAppModel) restoreActionReturn() {
 	default:
 		m.setHome(m.selectedWorkName)
 	}
+}
+
+func (m *workAppModel) openConflictProgramPicker() {
+	items := []list.Item{workItem{
+		kind: workItemAction, id: conflictProgramPrefix,
+		title: "Follow default", desc: "Use the current default Open with program",
+	}}
+	for _, program := range m.actions.Programs {
+		desc := program.ID
+		if program.ID == m.actions.ConflictProgram {
+			desc += " · current"
+		}
+		items = append(items, workItem{
+			kind: workItemAction, id: conflictProgramPrefix + program.ID,
+			title: program.Name, desc: desc,
+		})
+	}
+	m.setList(items)
+	m.screen = workConflictProgram
+}
+
+func (m workAppModel) updateConflictProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "h", "esc":
+		originalReturn := m.actionReturn
+		m.openActionPalette()
+		m.actionReturn = originalReturn
+		return m, nil
+	case "q":
+		m.cancelLoad()
+		m.quitting = true
+		return m, tea.Quit
+	case "enter", "l":
+		item, ok := m.list.SelectedItem().(workItem)
+		if !ok || !strings.HasPrefix(item.id, conflictProgramPrefix) {
+			return m, nil
+		}
+		return m.startSetConflictProgram(strings.TrimPrefix(item.id, conflictProgramPrefix))
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m workAppModel) startSetConflictProgram(programID string) (tea.Model, tea.Cmd) {
+	if m.actions.SetConflictProgram == nil {
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation := m.operationID
+	m.operationKind = "set-conflict-program"
+	m.operationTitle = "Saving conflict resolver"
+	m.operationMessage = "Updating local goworktree configuration…"
+	m.screen = workOperation
+	return m, func() tea.Msg {
+		err := m.actions.SetConflictProgram(operationCtx, programID)
+		return conflictProgramSavedMsg{generation: generation, programID: programID, err: err}
+	}
+}
+
+func (m workAppModel) handleConflictProgramSaved(msg conflictProgramSavedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "set-conflict-program" {
+		return m, nil
+	}
+	m.finishOperation()
+	if msg.err != nil {
+		m.setActionResult("Conflict resolver update failed", msg.err.Error(), m.actionReturn, false)
+		return m, nil
+	}
+	m.actions.ConflictProgram = msg.programID
+	label := "default program"
+	for _, program := range m.actions.Programs {
+		if program.ID == msg.programID {
+			label = program.Name
+			break
+		}
+	}
+	m.setActionResult("Conflict resolver updated", label+" will open automatically for Sync conflicts.", m.actionReturn, false)
+	return m, nil
 }
 
 func (m workAppModel) refreshFromAction() (tea.Model, tea.Cmd) {
@@ -483,6 +587,8 @@ func (m *workAppModel) setActionResult(title, content string, returnScreen workS
 	m.screen = workActionResult
 	m.resultReturn = returnScreen
 	m.resultRefresh = refresh
+	m.syncConflictPath = ""
+	m.syncWorkResult = syncwork.Result{}
 	m.setDetail(title, content)
 }
 
@@ -495,6 +601,14 @@ func (m *workAppModel) finishOperation() {
 
 func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "o":
+		if m.syncConflictPath != "" {
+			return m.startOpenSyncConflict()
+		}
+	case "s":
+		if m.syncConflictPath != "" {
+			return m.startSyncWorkPlanning()
+		}
 	case "enter", "h", "esc":
 		if m.resultRefresh {
 			m.restoreScreen = m.resultReturn
@@ -610,6 +724,66 @@ func (m workAppModel) handleSyncWorkCompleted(msg syncWorkCompletedMsg) (tea.Mod
 		title = "Sync Work needs attention"
 	}
 	m.setActionResult(title, content, workOverview, true)
+	m.syncWorkResult = msg.result
+	if repository, ok := firstSyncConflict(msg.result); ok {
+		m.syncConflictPath = repository.Destination
+		m.setDetail(title, formatSyncWorkConflict(msg.result, repository))
+		if m.actions.OpenConflict != nil {
+			return m.startOpenSyncConflict()
+		}
+	}
+	return m, nil
+}
+
+func firstSyncConflict(result syncwork.Result) (syncwork.RepositoryResult, bool) {
+	for _, repository := range result.Repositories {
+		if repository.Status == gitops.SyncConflict && repository.Destination != "" {
+			return repository, true
+		}
+	}
+	return syncwork.RepositoryResult{}, false
+}
+
+func (m workAppModel) startOpenSyncConflict() (tea.Model, tea.Cmd) {
+	if m.actions.OpenConflict == nil || m.syncConflictPath == "" {
+		return m, nil
+	}
+	repository, ok := firstSyncConflict(m.syncWorkResult)
+	if !ok {
+		return m, nil
+	}
+	operationCtx, cancel := context.WithCancel(m.ctx)
+	m.operationCancel = cancel
+	m.operationID++
+	generation := m.operationID
+	m.operationKind = "open-sync-conflict"
+	request := SyncConflictOpenRequest{
+		WorkName: m.selectedWorkName, RepositoryID: repository.ID, RepositoryPath: repository.Destination,
+	}
+	return m, func() tea.Msg {
+		program, err := m.actions.OpenConflict(operationCtx, request)
+		return syncConflictOpenedMsg{
+			generation: generation, repositoryID: repository.ID, program: program, err: err,
+		}
+	}
+}
+
+func (m workAppModel) handleSyncConflictOpened(msg syncConflictOpenedMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.operationID || m.operationKind != "open-sync-conflict" {
+		return m, nil
+	}
+	m.finishOperation()
+	repository, ok := firstSyncConflict(m.syncWorkResult)
+	if !ok {
+		return m, nil
+	}
+	content := formatSyncWorkConflict(m.syncWorkResult, repository)
+	if msg.err != nil {
+		content = "Resolver could not be opened: " + msg.err.Error() + "\n\n" + content
+	} else {
+		content = msg.program + " opened at the conflicted repository.\n\n" + content
+	}
+	m.setDetail("Sync Work needs attention", content)
 	return m, nil
 }
 
@@ -644,6 +818,31 @@ func formatSyncWorkResult(result syncwork.Result) string {
 			line += ": " + repository.Err.Error()
 		}
 		lines = append(lines, "", repository.ID, "  "+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatSyncWorkConflict(result syncwork.Result, conflict syncwork.RepositoryResult) string {
+	lines := []string{
+		factLine("Work", result.WorkName),
+		factLine("Repository", conflict.ID),
+		factLine("Path", conflict.Destination),
+		"",
+		"Resolve the rebase",
+		"  1. Resolve every conflicted file in the opened program.",
+		"  2. Stage resolved files with git add.",
+		"  3. Return here and press s to retry Sync.",
+		"",
+		"The retry continues the recorded rebase. It does not fetch a new base or restart completed repositories.",
+		"",
+		"Batch result",
+	}
+	for _, repository := range result.Repositories {
+		status := string(repository.Status)
+		if repository.Err != nil {
+			status += ": " + repository.Err.Error()
+		}
+		lines = append(lines, "  "+repository.ID+": "+status)
 	}
 	return strings.Join(lines, "\n")
 }

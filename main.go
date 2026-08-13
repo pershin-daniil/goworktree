@@ -95,6 +95,7 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		Version: version, Load: inspectConfiguredWorks,
 		PlanNewWork: planConfiguredNewWork, CreateNewWork: createConfiguredNewWork,
 		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
+		OpenConflict: openConfiguredConflict,
 		PlanSyncWork: planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
 		PlanRemoveWork: planConfiguredRemoveWork, RunRemoveWork: runConfiguredRemoveWork,
 		PlanRepairWork: planConfiguredRepairWork, RunRepairWork: runConfiguredRepairWork,
@@ -103,6 +104,8 @@ func configuredWorkAppActions() tui.WorkAppActions {
 	if err != nil {
 		return actions
 	}
+	actions.ConflictProgram = cfg.ConflictProgram
+	actions.SetConflictProgram = setConfiguredConflictProgram
 	repositoryIDs := cfg.RepoNames()
 	sort.Strings(repositoryIDs)
 	for _, id := range repositoryIDs {
@@ -124,6 +127,21 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		})
 	}
 	return actions
+}
+
+func setConfiguredConflictProgram(ctx context.Context, programID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if programID != "" && !cfg.ProgramEnabled(programID) {
+		return fmt.Errorf("conflict resolver %q is not enabled", programID)
+	}
+	cfg.ConflictProgram = programID
+	return cfg.Save()
 }
 
 func planConfiguredRepairWork(ctx context.Context, name string) (repairwork.Plan, error) {
@@ -328,6 +346,43 @@ func openConfiguredWork(ctx context.Context, request tui.WorkOpenRequest) error 
 		return fmt.Errorf("Work root changed from %s to %s", expectedRoot, observedRoot)
 	}
 	return openProgram(cfg, request.Program, observedRoot)
+}
+
+func openConfiguredConflict(ctx context.Context, request tui.SyncConflictOpenRequest) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "", err
+	}
+	workRoot, err := project.Dir(cfg, request.WorkName)
+	if err != nil {
+		return "", err
+	}
+	workRoot, err = filepath.Abs(workRoot)
+	if err != nil {
+		return "", err
+	}
+	repositoryPath, err := filepath.Abs(request.RepositoryPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Dir(filepath.Clean(repositoryPath)) != filepath.Clean(workRoot) {
+		return "", fmt.Errorf("conflict repository %s is outside Work %s", repositoryPath, workRoot)
+	}
+	programID := cfg.EffectiveConflictProgram()
+	if programID == "" {
+		return "", fmt.Errorf("no conflict resolver is enabled")
+	}
+	program, ok := cfg.Program(programID)
+	if !ok || !program.Enabled {
+		return "", fmt.Errorf("conflict resolver %q is not enabled", programID)
+	}
+	if err := openProgram(cfg, programID, repositoryPath); err != nil {
+		return "", err
+	}
+	return program.Name, nil
 }
 
 func inspectConfiguredWorks(ctx context.Context) (inspectworks.Snapshot, error) {

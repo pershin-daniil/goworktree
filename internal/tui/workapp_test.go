@@ -14,6 +14,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
 func TestWorkAppNavigatesHomeWorkAndRepository(t *testing.T) {
@@ -248,6 +249,96 @@ func TestWorkAppCtrlCCancelsOperationWithoutQuitting(t *testing.T) {
 	}
 	if operationCtx.Err() != context.Canceled || !strings.Contains(model.operationMessage, "Cancellation requested") {
 		t.Fatalf("operation cancellation = %v, message=%q", operationCtx.Err(), model.operationMessage)
+	}
+}
+
+func TestWorkAppOpensConfiguredResolverAndRetriesRecordedSyncConflict(t *testing.T) {
+	t.Parallel()
+
+	var opened SyncConflictOpenRequest
+	plan := syncwork.Plan{WorkName: "ticket-42", WorkID: "id"}
+	model := newWorkAppModel(WorkAppActions{
+		OpenConflict: func(_ context.Context, request SyncConflictOpenRequest) (string, error) {
+			opened = request
+			return "GoLand", nil
+		},
+		PlanSyncWork: func(_ context.Context, name string) (syncwork.Plan, error) {
+			if name != "ticket-42" {
+				t.Fatalf("planned Work = %q", name)
+			}
+			return plan, nil
+		},
+	}, context.Background(), nil)
+	model.selectedWorkName = "ticket-42"
+	model.operationID = 1
+	model.operationKind = "run-sync-work"
+	result := syncwork.Result{WorkName: "ticket-42", Repositories: []syncwork.RepositoryResult{{
+		ID: "api", Destination: "/works/ticket-42/api", Status: gitops.SyncConflict,
+	}}}
+
+	updated, cmd := model.Update(syncWorkCompletedMsg{generation: 1, result: result})
+	model = updated.(workAppModel)
+	if cmd == nil || model.screen != workActionResult || model.syncConflictPath == "" {
+		t.Fatalf("conflict result did not start resolver: screen=%v path=%q cmd=%v", model.screen, model.syncConflictPath, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if opened.RepositoryPath != "/works/ticket-42/api" || opened.RepositoryID != "api" || opened.WorkName != "ticket-42" {
+		t.Fatalf("open request = %+v", opened)
+	}
+	view := model.View()
+	for _, wanted := range []string{"GoLand opened", "git add", "press s to retry Sync", "o open resolver", "s retry Sync"} {
+		if !strings.Contains(view, wanted) {
+			t.Fatalf("conflict view missing %q:\n%s", wanted, view)
+		}
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	model = updated.(workAppModel)
+	if cmd == nil || model.screen != workOperation || model.operationKind != "plan-sync-work" {
+		t.Fatalf("retry did not re-plan Sync: screen=%v kind=%q cmd=%v", model.screen, model.operationKind, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workSyncPlan || model.syncWorkPlan.WorkName != "ticket-42" {
+		t.Fatalf("retry plan = %+v; screen=%v", model.syncWorkPlan, model.screen)
+	}
+}
+
+func TestWorkAppConfiguresConflictResolverFromActionPalette(t *testing.T) {
+	t.Parallel()
+
+	var saved string
+	model := newWorkAppModel(WorkAppActions{
+		Programs: []WorkProgramOption{{ID: "codex", Name: "Codex"}, {ID: "goland", Name: "GoLand", Default: true}},
+		SetConflictProgram: func(_ context.Context, programID string) error {
+			saved = programID
+			return nil
+		},
+	}, context.Background(), nil)
+	model.screen = workHome
+	model.openActionPalette()
+	for index, item := range model.list.Items() {
+		if value, ok := item.(workItem); ok && value.id == actionConflictProgram {
+			model.list.Select(index)
+			break
+		}
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workConflictProgram {
+		t.Fatalf("screen = %v, want conflict program picker", model.screen)
+	}
+	model.list.Select(2)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if cmd == nil || model.screen != workOperation {
+		t.Fatalf("save did not start: screen=%v cmd=%v", model.screen, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if saved != "goland" || model.actions.ConflictProgram != "goland" || !strings.Contains(model.View(), "Conflict resolver updated") {
+		t.Fatalf("saved=%q configured=%q view:\n%s", saved, model.actions.ConflictProgram, model.View())
 	}
 }
 

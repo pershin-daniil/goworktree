@@ -437,6 +437,21 @@ func runSync(args []string) error {
 			fmt.Printf("  %-12s %s: %v\n", repository.Status, repository.ID, repository.Err)
 		}
 	}
+	for _, repository := range result.Repositories {
+		if repository.Status != git.SyncConflict || repository.Destination == "" {
+			continue
+		}
+		program, openErr := openConfiguredConflict(context.Background(), tui.SyncConflictOpenRequest{
+			WorkName: result.WorkName, RepositoryID: repository.ID, RepositoryPath: repository.Destination,
+		})
+		if openErr != nil {
+			fmt.Printf("\nconflict resolver could not be opened: %v\n", openErr)
+		} else {
+			fmt.Printf("\nopened %s at %s\n", program, repository.Destination)
+		}
+		fmt.Printf("resolve conflicts, stage files with git add, then run `goworktree sync %s` again\n", result.WorkName)
+		break
+	}
 	if result.Failed() {
 		return fmt.Errorf("one or more repositories need attention; inspect the results and retry Sync Work")
 	}
@@ -897,6 +912,15 @@ func runConfigSet(key, value string) error {
 			return fmt.Errorf("default_program %q is not enabled", value)
 		}
 		cfg.DefaultProgram = value
+	case "conflict_program":
+		if value == "default" {
+			cfg.ConflictProgram = ""
+			break
+		}
+		if !cfg.ProgramEnabled(value) {
+			return fmt.Errorf("conflict_program %q is not enabled", value)
+		}
+		cfg.ConflictProgram = value
 	case "repos_root":
 		cfg.ReposRoot = value
 	case "projects_root":

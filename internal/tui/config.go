@@ -20,6 +20,7 @@ func FormatConfig(cfg *config.Config, path string) string {
 
 	rows := [][]string{
 		{"default_program", programLabel(cfg, cfg.DefaultProgram)},
+		{"conflict_program", conflictProgramLabel(cfg)},
 		{"repos", cfg.ReposRoot},
 		{"projects", cfg.ProjectsRoot},
 		{"branch", cfg.DefaultBranch},
@@ -43,7 +44,7 @@ func FormatConfig(cfg *config.Config, path string) string {
 	}
 	for _, row := range rows {
 		b.WriteString(fmt.Sprintf("  %s  %s\n",
-			labelStyle.Width(12).Render(row[0]),
+			labelStyle.Width(18).Render(row[0]),
 			row[1],
 		))
 	}
@@ -70,6 +71,15 @@ func FormatConfig(cfg *config.Config, path string) string {
 	}
 
 	return b.String()
+}
+
+func conflictProgramLabel(cfg *config.Config) string {
+	effective := cfg.EffectiveConflictProgram()
+	label := programLabel(cfg, effective)
+	if cfg.ConflictProgram == "" || !cfg.ProgramEnabled(cfg.ConflictProgram) {
+		return label + " (follows default)"
+	}
+	return label
 }
 
 func FormatProjects(projects []project.Entry, root string) string {

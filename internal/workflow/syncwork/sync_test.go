@@ -104,6 +104,37 @@ func TestInterruptedPlanContinuesOnlyRecordedRebase(t *testing.T) {
 	}
 }
 
+func TestExecutorRetryOfSamePlanContinuesRecordedConflict(t *testing.T) {
+	t.Parallel()
+
+	operationPath := t.TempDir() + "/sync.json"
+	git := &fakeGit{
+		checkouts: map[string]gitops.Checkout{"destination": {
+			Identity: gitops.RepositoryIdentity{CommonDir: "common"}, FullRef: "refs/heads/work", HeadOID: "head",
+		}},
+		rebase: map[string]gitops.SyncResult{"destination": {Status: gitops.SyncConflict, Err: errors.New("conflict")}},
+	}
+	plan := Plan{WorkName: "work", WorkID: "id", OperationRecord: operationPath, Repos: []RepositoryPlan{{
+		ID: "repo", Destination: "destination", GitCommonDir: "common", BranchRef: "refs/heads/work",
+		PreHeadOID: "head", BaseOID: "base", Relation: RelationDiverged,
+	}}}
+	executor := Executor{Git: git, Locker: fakeLocker{}}
+	first, err := executor.Execute(context.Background(), plan)
+	if err != nil || first.Repositories[0].Status != gitops.SyncConflict {
+		t.Fatalf("first Execute = %+v, %v", first, err)
+	}
+	git.operations = map[string][]gitops.ActiveOperation{"destination": {gitops.OperationRebase}}
+	git.rebase["destination"] = gitops.SyncResult{Status: gitops.SyncRebased, To: "new"}
+
+	second, err := executor.Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Repositories[0].Status != gitops.SyncRebased || git.rebased[len(git.rebased)-1] != "continue:destination:base" {
+		t.Fatalf("second Execute = %+v; calls = %v", second, git.rebased)
+	}
+}
+
 func healthySnapshot(t *testing.T, id, head string) inspectwork.Snapshot {
 	t.Helper()
 	name, err := work.ParseName("work")

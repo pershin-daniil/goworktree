@@ -53,11 +53,12 @@ type Plan struct {
 }
 
 type RepositoryResult struct {
-	ID     string
-	Status gitops.SyncStatus
-	From   string
-	To     string
-	Err    error
+	ID          string
+	Destination string
+	Status      gitops.SyncStatus
+	From        string
+	To          string
+	Err         error
 }
 
 type Result struct {
@@ -316,13 +317,16 @@ func (e Executor) Execute(ctx context.Context, plan Plan) (result Result, return
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		observed := RepositoryResult{ID: repository.ID, Status: gitops.SyncFailed, From: repository.PreHeadOID}
+		observed := RepositoryResult{
+			ID: repository.ID, Destination: repository.Destination,
+			Status: gitops.SyncFailed, From: repository.PreHeadOID,
+		}
 		if record.Repositories[index].Status == string(gitops.SyncRebased) || record.Repositories[index].Status == string(gitops.SyncUpToDate) {
 			observed.Status = gitops.SyncStatus(record.Repositories[index].Status)
 			result.Repositories = append(result.Repositories, observed)
 			continue
 		}
-		if repository.Recovery {
+		if repository.Recovery || record.Repositories[index].Status == string(gitops.SyncConflict) || record.Repositories[index].Status == "rebasing" {
 			observed = e.recover(ctx, repository)
 			record.Repositories[index].Status = string(observed.Status)
 			if err := e.save(record); err != nil {
@@ -369,7 +373,10 @@ func (e Executor) Execute(ctx context.Context, plan Plan) (result Result, return
 }
 
 func (e Executor) recover(ctx context.Context, planned RepositoryPlan) RepositoryResult {
-	result := RepositoryResult{ID: planned.ID, Status: gitops.SyncFailed, From: planned.PreHeadOID}
+	result := RepositoryResult{
+		ID: planned.ID, Destination: planned.Destination,
+		Status: gitops.SyncFailed, From: planned.PreHeadOID,
+	}
 	operations, err := e.Git.ActiveOperations(ctx, planned.Destination)
 	if err != nil {
 		result.Err = err

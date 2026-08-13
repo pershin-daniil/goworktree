@@ -30,20 +30,23 @@ const (
 )
 
 type WorkAppActions struct {
-	Version        string
-	Load           func(context.Context) (inspectworks.Snapshot, error)
-	Repositories   []WorkRepositoryOption
-	Programs       []WorkProgramOption
-	PlanNewWork    func(context.Context, newwork.Request) (newwork.Plan, error)
-	CreateNewWork  func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
-	ResumeNewWork  func(context.Context, string) (newwork.ExecutionResult, error)
-	OpenWork       func(context.Context, WorkOpenRequest) error
-	PlanSyncWork   func(context.Context, string) (syncwork.Plan, error)
-	RunSyncWork    func(context.Context, syncwork.Plan) (syncwork.Result, error)
-	PlanRemoveWork func(context.Context, string) (removework.Plan, error)
-	RunRemoveWork  func(context.Context, removework.Plan, string) (removework.Result, error)
-	PlanRepairWork func(context.Context, string) (repairwork.Plan, error)
-	RunRepairWork  func(context.Context, repairwork.Plan) (repairwork.Result, error)
+	Version            string
+	Load               func(context.Context) (inspectworks.Snapshot, error)
+	Repositories       []WorkRepositoryOption
+	Programs           []WorkProgramOption
+	ConflictProgram    string
+	SetConflictProgram func(context.Context, string) error
+	PlanNewWork        func(context.Context, newwork.Request) (newwork.Plan, error)
+	CreateNewWork      func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
+	ResumeNewWork      func(context.Context, string) (newwork.ExecutionResult, error)
+	OpenWork           func(context.Context, WorkOpenRequest) error
+	OpenConflict       func(context.Context, SyncConflictOpenRequest) (string, error)
+	PlanSyncWork       func(context.Context, string) (syncwork.Plan, error)
+	RunSyncWork        func(context.Context, syncwork.Plan) (syncwork.Result, error)
+	PlanRemoveWork     func(context.Context, string) (removework.Plan, error)
+	RunRemoveWork      func(context.Context, removework.Plan, string) (removework.Result, error)
+	PlanRepairWork     func(context.Context, string) (repairwork.Plan, error)
+	RunRepairWork      func(context.Context, repairwork.Plan) (repairwork.Result, error)
 }
 
 type WorkRepositoryOption struct {
@@ -64,6 +67,12 @@ type WorkOpenRequest struct {
 	Program  string
 }
 
+type SyncConflictOpenRequest struct {
+	WorkName       string
+	RepositoryID   string
+	RepositoryPath string
+}
+
 type workScreen int
 
 const (
@@ -74,6 +83,7 @@ const (
 	workProblem
 	workLoadError
 	workActions
+	workConflictProgram
 	workNewName
 	workNewRepositories
 	workNewPlan
@@ -145,6 +155,19 @@ type syncWorkCompletedMsg struct {
 	err        error
 }
 
+type syncConflictOpenedMsg struct {
+	generation   uint64
+	repositoryID string
+	program      string
+	err          error
+}
+
+type conflictProgramSavedMsg struct {
+	generation uint64
+	programID  string
+	err        error
+}
+
 type removeWorkPlannedMsg struct {
 	generation uint64
 	plan       removework.Plan
@@ -193,6 +216,8 @@ type workAppModel struct {
 	newWorkMode      newwork.Mode
 	newWorkPlan      newwork.Plan
 	syncWorkPlan     syncwork.Plan
+	syncWorkResult   syncwork.Result
+	syncConflictPath string
 	removeWorkPlan   removework.Plan
 	repairWorkPlan   repairwork.Plan
 	operationCancel  context.CancelFunc
@@ -271,6 +296,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSyncWorkPlanned(msg)
 	case syncWorkCompletedMsg:
 		return m.handleSyncWorkCompleted(msg)
+	case syncConflictOpenedMsg:
+		return m.handleSyncConflictOpened(msg)
+	case conflictProgramSavedMsg:
+		return m.handleConflictProgramSaved(msg)
 	case removeWorkPlannedMsg:
 		return m.handleRemoveWorkPlanned(msg)
 	case removeWorkCompletedMsg:
@@ -311,6 +340,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workNewName {
 			return m.updateNewWorkName(msg)
+		}
+		if m.screen == workConflictProgram {
+			return m.updateConflictProgram(msg)
 		}
 		if m.screen == workOperation {
 			return m, nil
@@ -681,6 +713,8 @@ func (m workAppModel) View() string {
 			contextLine += " · " + m.actionNotice
 		}
 		return m.listView("Actions", contextLine, "j/k move  l/enter select  h/esc close  / search  q quit")
+	case workConflictProgram:
+		return m.listView("Conflict resolver", "Opened automatically for Sync conflicts", "j/k move  l/enter select  h/esc back  / search  q quit")
 	case workNewName:
 		return m.newWorkNameView()
 	case workNewRepositories:
@@ -702,7 +736,11 @@ func (m workAppModel) View() string {
 	case workOperation:
 		return m.operationView()
 	case workActionResult:
-		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/h/esc back  q quit")
+		hint := "j/k scroll  ctrl+u/d page  g/G top/bottom  enter/h/esc back  q quit"
+		if m.syncConflictPath != "" {
+			hint = "o open resolver  s retry Sync  j/k scroll  h/esc back  q quit"
+		}
+		return m.detailView(hint)
 	default:
 		return ""
 	}

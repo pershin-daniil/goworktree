@@ -271,31 +271,31 @@ recorded and all not-started repositories are reported explicitly.
 
 ## Conflict recovery
 
-After independent batch processing, the result opens an `Action required` list.
-The user selects conflicts in any order.
+After independent batch processing, the result focuses the first repository
+whose rebase needs manual resolution. Later conflicts use the same cycle.
 
 ### Rebase conflict
 
-The screen shows:
+The configured conflict resolver opens automatically at the exact repository,
+not at the Work root. The screen shows:
 
-- repository and worktree;
-- conflicted paths;
-- completed and remaining batch outcomes;
-- preserved working-state object status;
-- actions: Open, Reinspect, Continue Rebase, Abort Rebase.
+- repository and exact worktree path;
+- completed and failed batch outcomes;
+- actions: Open resolver and Retry Sync.
 
 Rules:
 
-1. Returning from an editor or shell always triggers reinspection.
-2. Continue is enabled only when Git reports the owned rebase and no unresolved
-   index entries remain after the user stages resolutions.
-3. Continue may produce another conflict and repeats the same cycle.
-4. Successful rebase continuation proceeds to working-state restoration.
-5. Abort uses Git's rebase abort, verifies the original pre-Sync HEAD, and then
-   restores the preserved working state.
-6. The recovery ref remains until working-state restoration is verified.
+1. The user resolves files in the configured program and stages them with Git.
+2. Retry Sync reinspects the persisted operation and continues only its owned
+   rebase; it does not fetch a newer base or restart completed repositories.
+3. Continue may produce another conflict, opens the resolver again, and repeats
+   the same cycle.
+4. Successful rebase continuation completes the recorded repository outcome.
 
-Aborting one repository does not roll back repositories already synchronized.
+An application-owned Abort action is not implemented yet. Running `git rebase
+--abort` manually leaves the persisted Sync record unfinished and requires a
+separate recovery decision; the UI therefore does not present manual abort as
+the normal conflict workflow.
 
 ### Restore conflict
 

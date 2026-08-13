@@ -26,6 +26,26 @@ func TestNormalizeProgramsSelectsEnabledDefault(t *testing.T) {
 	}
 }
 
+func TestEffectiveConflictProgramUsesOverrideAndDefaultFallback(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.DefaultProgram = ProgramCursor
+	if got := cfg.EffectiveConflictProgram(); got != ProgramCursor {
+		t.Fatalf("conflict program = %q, want default %q", got, ProgramCursor)
+	}
+	cfg.ConflictProgram = ProgramGoland
+	if got := cfg.EffectiveConflictProgram(); got != ProgramGoland {
+		t.Fatalf("conflict program = %q, want override %q", got, ProgramGoland)
+	}
+	goland := cfg.OpenWith[ProgramGoland]
+	goland.Enabled = false
+	cfg.OpenWith[ProgramGoland] = goland
+	if got := cfg.EffectiveConflictProgram(); got != ProgramCursor {
+		t.Fatalf("disabled override resolved to %q, want default %q", got, ProgramCursor)
+	}
+}
+
 func TestLoadMigratesLegacyProgramSettings(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir, err := Dir()
