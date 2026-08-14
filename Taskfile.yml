@@ -101,6 +101,12 @@ tasks:
     cmds:
       - ./{{.BINARY}} remove {{.CLI_ARGS}}
 
+  archives:
+    desc: List, inspect, or delete removed-Work metadata archives
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} archives {{.CLI_ARGS}}
+
   doctor:
     desc: Check git, editors, and config
     deps: [build]

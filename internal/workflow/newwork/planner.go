@@ -132,6 +132,12 @@ func (p Planner) Build(ctx context.Context, catalog Catalog, request Request) (P
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Plan{}, problems(Problem{Code: CodeInternal, Operation: "inspect-operation-record", Path: operationRecordPath, Cause: err})
 	}
+	removeOperationPath := filepath.Join(controlRoot, "operations", "remove-work", workID.String()+".json")
+	if _, err := os.Lstat(removeOperationPath); err == nil {
+		return Plan{}, problems(Problem{Code: CodeAlreadyExists, Operation: "inspect-remove-operation-record", Path: removeOperationPath, Cause: fmt.Errorf("active Remove Work operation exists; Resume Remove Work before reusing this Work name")})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Plan{}, problems(Problem{Code: CodeInternal, Operation: "inspect-remove-operation-record", Path: removeOperationPath, Cause: err})
+	}
 
 	selected, selectProblems := selectRepositories(catalog, request, workRoot)
 	if len(selectProblems) > 0 {

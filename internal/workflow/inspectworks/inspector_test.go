@@ -13,6 +13,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/work"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 )
 
 func TestInspectUnionsDirectoriesAndOperationRecordsInStableOrder(t *testing.T) {
@@ -92,6 +93,103 @@ func TestInspectRecordFailureDoesNotHideDirectoryWorks(t *testing.T) {
 	}
 	if len(snapshot.Problems) != 1 || snapshot.Problems[0].Code != ProblemOperationRecordInvalid {
 		t.Fatalf("collection problems = %+v", snapshot.Problems)
+	}
+}
+
+func TestInspectDiscoversActiveRemoveOperationAfterWorkRootIsGone(t *testing.T) {
+	t.Parallel()
+
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	controlRoot := t.TempDir()
+	mustMkdir(t, worksRoot)
+	canonicalWorksRoot, err := filepath.EvalSymlinks(worksRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "removed-work"
+	parsedName, err := work.ParseName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workID := work.NewIdentity(canonicalWorksRoot, parsedName).String()
+	removeDirectory := filepath.Join(controlRoot, "operations", "remove-work")
+	mustMkdir(t, removeDirectory)
+	operationPath := filepath.Join(removeDirectory, workID+".json")
+	if err := os.WriteFile(operationPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	operationPath, err = filepath.EvalSymlinks(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeWorks := &fakeWorkInspector{}
+	inspector := Inspector{
+		Works:      fakeWorks,
+		Operations: fakeOperationReader{},
+		RemoveOperations: fakeRemoveOperationReader{records: map[string]removework.ActiveRecord{
+			operationPath: {WorkName: name, WorkID: workID, WorkRoot: filepath.Join(worksRoot, name)},
+		}},
+	}
+	snapshot, err := inspector.Inspect(context.Background(), Request{WorksRoot: worksRoot, ControlRoot: controlRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := workNames(snapshot.Works); got != name {
+		t.Fatalf("Works = %q, want %q", got, name)
+	}
+	entry := snapshot.Works[0]
+	if !entry.FromOperation || entry.FromDirectory {
+		t.Fatalf("Remove-only Work discovery = %+v", entry)
+	}
+	if got := fakeWorks.names(); got != name {
+		t.Fatalf("inspected names = %q, want %q", got, name)
+	}
+}
+
+func TestInspectRejectsRemoveOperationOutsideConfiguredWorksRoot(t *testing.T) {
+	t.Parallel()
+
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	controlRoot := t.TempDir()
+	mustMkdir(t, worksRoot)
+	canonicalWorksRoot, err := filepath.EvalSymlinks(worksRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "unsafe-remove"
+	parsedName, err := work.ParseName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workID := work.NewIdentity(canonicalWorksRoot, parsedName).String()
+	removeDirectory := filepath.Join(controlRoot, "operations", "remove-work")
+	mustMkdir(t, removeDirectory)
+	operationPath := filepath.Join(removeDirectory, workID+".json")
+	if err := os.WriteFile(operationPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	operationPath, err = filepath.EvalSymlinks(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inspector := Inspector{
+		Works:      &fakeWorkInspector{},
+		Operations: fakeOperationReader{},
+		RemoveOperations: fakeRemoveOperationReader{records: map[string]removework.ActiveRecord{
+			operationPath: {WorkName: name, WorkID: workID, WorkRoot: filepath.Join(t.TempDir(), name)},
+		}},
+	}
+	snapshot, err := inspector.Inspect(context.Background(), Request{WorksRoot: worksRoot, ControlRoot: controlRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Works) != 0 {
+		t.Fatalf("unsafe Remove operation produced Works: %+v", snapshot.Works)
+	}
+	if len(snapshot.Problems) != 1 || snapshot.Problems[0].Code != ProblemOperationOutsideWorksRoot {
+		t.Fatalf("problems = %+v", snapshot.Problems)
 	}
 }
 
@@ -206,6 +304,22 @@ func (f *fakeWorkInspector) names() string {
 type fakeOperationReader struct {
 	records  map[string]newwork.OperationRecord
 	failures map[string]error
+}
+
+type fakeRemoveOperationReader struct {
+	records  map[string]removework.ActiveRecord
+	failures map[string]error
+}
+
+func (f fakeRemoveOperationReader) LoadActive(path string) (removework.ActiveRecord, error) {
+	if err := f.failures[path]; err != nil {
+		return removework.ActiveRecord{}, err
+	}
+	record, ok := f.records[path]
+	if !ok {
+		return removework.ActiveRecord{}, os.ErrNotExist
+	}
+	return record, nil
 }
 
 func (f fakeOperationReader) Load(path string) (newwork.OperationRecord, error) {

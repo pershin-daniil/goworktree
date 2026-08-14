@@ -147,6 +147,14 @@ The following are fixed for the first architectural refactor.
 13. An unexpected panic is caught only at the process boundary. The process
     exits unsuccessfully, preserves recovery information, and does not continue
     mutation.
+14. Aggregate dirty-file counts are informational, not destructive
+    authorization. Remove and automatic Sync cleanup require exact, durable
+    fingerprints of every affected worktree state and revalidate them
+    immediately before mutation.
+15. A process that resumes after interruption never adopts the currently
+    observed dirty state as application-owned. If no matching fingerprint was
+    durably recorded before interruption, automatic reset, clean, and removal
+    stop while recovery information is retained.
 
 ## Sources of truth
 
@@ -545,10 +553,12 @@ For each repository:
 
 1. Inspect branch, HEAD, staged, unstaged, untracked, ignored, conflicted, and
    submodule state.
-2. Preserve staged, unstaged, and untracked changes using an application-owned
+2. Fetch the configured remote and resolve the selected base to a commit OID,
+   unless an unfinished operation must be resumed first.
+3. Preserve staged, unstaged, and untracked changes using an application-owned
    recovery object identified by immutable commit OID.
-3. Do not modify or delete existing user stash entries.
-4. Fetch the configured remote and resolve the selected base to a commit OID.
+4. Restore the pre-existing user stash stack after promoting the owned object
+   to its private ref; do not delete user stash entries.
 5. Rebase the expected work branch onto that exact base OID.
 6. Restore preserved changes, including index state.
 7. Inspect and checkpoint the final state.
@@ -563,8 +573,8 @@ Batch behavior:
   continues with independent repositories;
 - an application-wide invariant failure, unavailable control store, invalid
   repository identity, or impossible lock set stops the batch;
-- final result lists completed, unchanged, conflicted, restore-conflicted,
-  failed, and not-started repositories;
+- final result lists completed, unchanged, clean-worktree rebase conflicts,
+  rolled-back, failed-known-state, failed, and not-started repositories;
 - conflict recovery begins after the independent batch has finished;
 - a repeated Sync reinspects all repositories, skips verified completed work,
   continues valid paused operations, and runs only remaining valid steps.
@@ -633,17 +643,21 @@ Normative detailed specification: [workflows/REMOVE_WORK.md](workflows/REMOVE_WO
 2. Build a complete plan containing:
    - every worktree path;
    - every local work branch and tip OID;
-   - count of unique local commits that branch deletion makes unreachable from
-     the selected comparison refs;
    - every managed harness file;
    - unknown files or directories that complete Work removal will also delete;
    - an explicit statement that remote branches are unchanged.
 3. Require the user to type the exact Work name to confirm complete removal.
-4. Record removal recovery information outside the Work directory.
+4. Record removal intent outside the Work directory before every mutation.
 5. Remove and verify worktrees and registrations.
 6. Delete confirmed local work branches even when they contain unique commits.
 7. Remove the Work directory and remaining confirmed contents.
-8. Verify absence from filesystem, worktree registrations, and local work refs.
+8. Publish a verified metadata archive under `archives/removed-work` using a staged directory and atomic rename.
+9. Clear active New Work and terminal Sync records, then clear the active Remove record last.
+10. Verify absence from filesystem, worktree registrations, local work refs, and the dashboard. Archive metadata is not a backup of deleted files or uncommitted changes.
+
+The unique-local-commit warning is a separate follow-up. The current P1
+workflow still deletes the exact confirmed local branch OID, but does not claim
+to calculate or display its unique commits.
 
 Remove Work is destructive by definition. Its safety comes from exact scope,
 explicit confirmation, identity revalidation, and verified results—not from
@@ -693,12 +707,10 @@ For initial New Work generation:
 
 1. Whether `go.work.sum` is managed, preserved, or removed with Work harness.
 2. Migration from the current project manifest to the version-1 Work manifest.
-3. Retention and archive policy for completed operation records.
-4. Cross-platform repository identity and filesystem durability fallbacks where
+3. Cross-platform repository identity and filesystem durability fallbacks where
    hard links or directory sync are unavailable.
-5. Cancellation behavior for each class of Git subprocess.
-6. Exact Rename Work ordering and rollback semantics for directory, local
+4. Exact Rename Work ordering and rollback semantics for directory, local
    branches, worktree registrations, and interruption.
-7. Stable machine-readable result and error schemas beyond New Work version 1.
-8. Whether future managed `AGENTS.md` or `Taskfile.yml` files are templates,
+5. Stable machine-readable result and error schemas beyond New Work version 1.
+6. Whether future managed `AGENTS.md` or `Taskfile.yml` files are templates,
    generated artifacts, or user-owned files after creation.

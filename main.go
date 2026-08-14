@@ -59,6 +59,8 @@ func main() {
 		err = runList()
 	case "remove", "rm":
 		err = runRemove(os.Args[2:])
+	case "archives":
+		err = runArchives(os.Args[2:])
 	case "cursor":
 		err = runCursor(os.Args[2:])
 	case "goland":
@@ -198,7 +200,7 @@ func planConfiguredRemoveWork(ctx context.Context, name string) (removework.Plan
 	if err != nil {
 		return removework.Plan{}, err
 	}
-	return (removework.Planner{}).Build(snapshot, controlRoot)
+	return (removework.Planner{Git: removework.SystemGit{}}).Build(operationCtx, snapshot, controlRoot)
 }
 
 func runConfiguredRemoveWork(ctx context.Context, plan removework.Plan, confirmation string) (removework.Result, error) {
@@ -214,6 +216,7 @@ func runConfiguredRemoveWork(ctx context.Context, plan removework.Plan, confirma
 	defer cancel()
 	return (removework.Executor{
 		Git: removework.SystemGit{}, Locker: removework.FileLocker{Set: lockops.Set{Root: controlRoot}},
+		Safety: removework.SystemSafety{},
 	}).Execute(operationCtx, plan, confirmation)
 }
 
@@ -518,6 +521,7 @@ usage:
   goworktree branch <project> <repo> adopt a worktree's current branch
   goworktree list
   goworktree remove <work> --confirm <exact-work-name> delete Work worktrees and local branches
+  goworktree archives <list|show|delete>             inspect or delete removed-Work metadata archives
   goworktree cursor <project>
   goworktree goland <project>
   goworktree open <project>        open project in default program

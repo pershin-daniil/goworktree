@@ -347,6 +347,17 @@ func ContinueRebaseContext(ctx context.Context, repo, expectedBranch, baseOID st
 // fetching. It preserves staged, unstaged, and untracked changes around the
 // rebase and never addresses a user stash by a mutable selector.
 func RebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	return rebaseWorktreeToOIDContext(ctx, repo, expectedBranch, baseOID, true)
+}
+
+// RebaseCleanWorktreeToOIDContext rebases only a verified clean worktree. It
+// never creates an auto-stash; durable preservation belongs to Sync Work's
+// private recovery-ref state machine.
+func RebaseCleanWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	return rebaseWorktreeToOIDContext(ctx, repo, expectedBranch, baseOID, false)
+}
+
+func rebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string, preserveDirty bool) SyncResult {
 	result := SyncResult{Status: SyncFailed, To: baseOID}
 	if strings.TrimSpace(baseOID) == "" {
 		result.Err = fmt.Errorf("base commit is empty")
@@ -390,6 +401,10 @@ func RebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseO
 	dirty, err := isDirty(repo)
 	if err != nil {
 		result.Err = err
+		return result
+	}
+	if dirty && !preserveDirty {
+		result.Err = fmt.Errorf("working tree is dirty after preservation")
 		return result
 	}
 	stashed := false
@@ -480,8 +495,16 @@ func IsAncestorContext(ctx context.Context, repo, older, newer string) (bool, er
 }
 
 func rebaseInProgress(repo string) bool {
-	_, err := run(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD")
-	return err == nil
+	operations, err := ActiveOperationsContext(context.Background(), repo)
+	if err != nil {
+		return false
+	}
+	for _, operation := range operations {
+		if operation == OperationRebase {
+			return true
+		}
+	}
+	return false
 }
 
 func shortRevision(revision string) string {

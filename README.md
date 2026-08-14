@@ -38,6 +38,7 @@ goworktree                      # Works dashboard, New Work, and scoped actions
 goworktree start EVOVPC-2855 --repos api,web # create / resume typed New Work
 goworktree list
 goworktree sync EVOVPC-2855     # plan fetched base OIDs, then rebase Work branches
+goworktree archives list         # list metadata retained after Remove Work
 goworktree cursor EVOVPC-2855   # open a project in Cursor
 ```
 
@@ -59,8 +60,8 @@ task doctor
 3. **`start <name>` / dashboard New Work** — both use the same typed planner/executor. The online plan fetches configured remotes, resolves immutable base OIDs, then creates branch `<name>` and its worktrees only after the plan succeeds. `--offline` resolves only locally known refs.
 4. **Persistence** — `.goworktree.json` stores Work intent; the external New Work operation record stores durable checkpoints. Re-run `start` to resume only verified pending steps.
 5. **`add` / `drop`** — change the repo set mid-task. Legacy folders without a manifest are auto-migrated. `drop -D` deletes only **local** project branches.
-6. **`remove`** — show exact local deletion targets and require the case-sensitive Work name. After confirmation it writes an external recovery record, removes managed worktrees, compare-and-deletes confirmed local branch OIDs, then removes the confirmed Work root. Remote and remote-tracking refs are never deletion targets.
-7. **`sync`** — inspect the Work, fetch each configured remote, show/record the exact resolved base commit, revalidate the confirmed checkout state, and rebase each eligible Work branch onto that immutable OID. Staged, unstaged, and untracked files are preserved by immutable stash ID. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked. An external checkpoint owns an unfinished rebase, so resolving/staging its conflict and repeating Sync continues only that recorded operation.
+6. **`remove`** — require a completed New Work record, show exact local deletion targets, and require the case-sensitive Work name. It fingerprints each complete worktree and every remaining Work-root entry, rejects any post-plan change, records intent before each local mutation, removes managed worktrees, compare-and-deletes confirmed local branch OIDs, and removes the confirmed Work root. On success it archives operation metadata under `~/.config/goworktree/archives/removed-work/`; the dashboard no longer shows the Work and the name can be reused. Remote and remote-tracking refs are never deletion targets.
+7. **`sync`** — inspect the Work, fetch each configured remote, show the exact resolved base commit, record and revalidate the complete worktree fingerprint, and rebase each eligible Work branch onto the immutable OID. Dirty files are preserved in an application-owned private recovery ref, rather than a user stash entry. The ref is deleted only after a successful restore has an exact durable fingerprint; ambiguous Resume state retains it and refuses destructive cleanup. One repository failure does not stop independent repositories; dirty submodules and unrelated active Git operations are blocked.
 8. **`branch`** — adopt the branch currently checked out in one worktree when a repository needs a project-specific branch name.
 9. **`repair`** — plans only deterministic repairs: reattach a missing checkout from its exact existing local branch, repair a proven checkout registration, regenerate a missing `go.work`, or reconstruct a missing completed New Work record from a valid manifest. Ambiguous branch, OID, repository-identity, or corrupt-manifest states are reported without mutation.
 
@@ -77,6 +78,9 @@ task doctor
 | `branch <project> <repo>` | Adopt a repository worktree's current branch in the project manifest |
 | `list` / `ls` | List project groups |
 | `remove` / `rm` `<work> --confirm <exact-work-name>` | Typed Remove Work; delete confirmed worktrees, local refs, and root |
+| `archives list` | List retained metadata from completed Remove Work operations |
+| `archives show <archive-id>` | Verify and display a removed-Work metadata archive |
+| `archives delete <archive-id> --confirm <archive-id>` | Delete one verified metadata archive |
 | `cursor` / `goland` / `open` | Open project in a compatibility editor / the default program |
 | `programs list/add/update/delete/default/search` | Manage programs shown under Open with |
 | `doctor` | Check git, editors, config |
@@ -200,6 +204,7 @@ Module path: `github.com/pershin-daniil/goworktree`.
 - Project names and manifest folder names must be single directory components; this prevents operations from escaping `projects_root`.
 - Mutating commands acquire a per-project lock. If a process exits unexpectedly, inspect the named `.goworktree.lock` before removing it.
 - `drop` records removal progress per repository. If it stops midway, re-run it with the remaining repository IDs or use `repair`.
+- Remove Work archives metadata only; they do not retain deleted worktree files, commits, or uncommitted changes.
 - One git branch → one worktree (project branch is created with `-b` from the base).
 - Editor subprocess stdout/stderr is discarded so Node/IDE noise does not corrupt the TUI.
 - No shell completions yet; no multi-panel dashboard.

@@ -12,6 +12,7 @@ import (
 
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
+	"github.com/pershin-daniil/goworktree/internal/work"
 )
 
 func TestPlannerBuildOnlineFromFetchedCommitWithoutWorkMutation(t *testing.T) {
@@ -211,6 +212,54 @@ func TestPlannerRoutesExistingOperationToResumeBeforeGitPreparation(t *testing.T
 	}
 	_, err = planner.Build(context.Background(), catalog, request)
 	assertProblemCode(t, err, CodeAlreadyExists)
+}
+
+func TestPlannerBlocksWorkNameUntilActiveRemoveRecordIsFinalized(t *testing.T) {
+	t.Parallel()
+
+	repo := newLocalRepository(t, false)
+	worksRoot := filepath.Join(t.TempDir(), "works")
+	mustMkdir(t, worksRoot)
+	controlRoot := t.TempDir()
+	worksRoot, err := filepath.EvalSymlinks(worksRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlRoot, err = filepath.EvalSymlinks(controlRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := Catalog{
+		WorksRoot:   worksRoot,
+		ControlRoot: controlRoot,
+		Repositories: map[string]Repository{
+			"repo": {SourcePath: repo, Folder: "repo", BasePreference: "main"},
+		},
+	}
+	request := Request{Name: "work-being-removed", RepositoryIDs: []string{"repo"}, Mode: ModeOffline}
+	workName, err := work.ParseName(request.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workID := work.NewIdentity(worksRoot, workName)
+	removeRecord := filepath.Join(controlRoot, "operations", "remove-work", workID.String()+".json")
+	mustMkdir(t, filepath.Dir(removeRecord))
+	if err := os.WriteFile(removeRecord, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (Planner{Git: SystemGit{}}).Build(context.Background(), catalog, request)
+	assertProblemCode(t, err, CodeAlreadyExists)
+	if err == nil || !strings.Contains(err.Error(), "Resume Remove Work") {
+		t.Fatalf("active Remove error = %v, want Resume Remove Work guidance", err)
+	}
+
+	if err := os.Remove(removeRecord); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Planner{Git: SystemGit{}}).Build(context.Background(), catalog, request); err != nil {
+		t.Fatalf("Build after Remove finalization: %v", err)
+	}
 }
 
 func assertProblemCode(t *testing.T, err error, code ErrorCode) {

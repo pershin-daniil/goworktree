@@ -979,6 +979,9 @@ func formatRemoveWorkPlan(plan removework.Plan) string {
 
 func formatRemoveWorkResult(result removework.Result) string {
 	lines := []string{factLine("Work", result.WorkName), factLine("Root removed", fmt.Sprint(result.RootRemoved))}
+	if result.ArchiveID != "" {
+		lines = append(lines, factLine("Archive", result.ArchiveID), factLine("Archive path", result.ArchivePath))
+	}
 	for _, repository := range result.Repositories {
 		line := repository.Status
 		if repository.Err != nil {

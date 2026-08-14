@@ -266,11 +266,9 @@ func RemoveWorktreeContext(ctx context.Context, source, destination string) erro
 	if err != nil {
 		return fmt.Errorf("absolute worktree path: %w", err)
 	}
-	if _, err := runContext(ctx, canonicalSource, "worktree", "remove", "--force", filepath.Clean(destination)); err != nil {
-		return err
-	}
-	_, err = runContext(ctx, canonicalSource, "worktree", "prune")
-	return err
+	_, removeErr := runContext(ctx, canonicalSource, "worktree", "remove", "--force", filepath.Clean(destination))
+	_, pruneErr := runContext(ctx, canonicalSource, "worktree", "prune")
+	return errors.Join(removeErr, pruneErr)
 }
 
 // PruneAndAttachWorktreeContext removes stale registrations, then attaches the

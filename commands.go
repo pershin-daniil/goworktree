@@ -11,9 +11,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/pershin-daniil/goworktree/internal/archive"
 	"github.com/pershin-daniil/goworktree/internal/config"
 	"github.com/pershin-daniil/goworktree/internal/git"
+	lockops "github.com/pershin-daniil/goworktree/internal/lock"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
@@ -842,7 +845,69 @@ func runRemove(args []string) error {
 		return err
 	}
 	fmt.Printf("removed: %s\n", result.WorkName)
+	if result.ArchiveID != "" {
+		fmt.Printf("archive: %s\narchive path: %s\n", result.ArchiveID, result.ArchivePath)
+	}
 	return nil
+}
+
+func runArchives(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: goworktree archives <list|show|delete>")
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return fmt.Errorf("resolve control root: %w", err)
+	}
+	store := archive.Store{ControlRoot: controlRoot, Locks: lockops.Set{Root: controlRoot}}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: goworktree archives list")
+		}
+		archives, err := store.List()
+		if err != nil {
+			return fmt.Errorf("list removed-Work archives: %w", err)
+		}
+		if len(archives) == 0 {
+			fmt.Println("no removed-Work archives")
+			return nil
+		}
+		for _, summary := range archives {
+			fmt.Printf("%s\t%s\t%s\n", summary.Manifest.ArchiveID, summary.Manifest.WorkName, summary.Manifest.CreatedAt.UTC().Format(time.RFC3339))
+		}
+		return nil
+	case "show":
+		if len(args) != 2 || args[1] == "" {
+			return fmt.Errorf("usage: goworktree archives show <archive-id>")
+		}
+		summary, err := store.Show(args[1])
+		if err != nil {
+			return fmt.Errorf("show removed-Work archive %q: %w", args[1], err)
+		}
+		fmt.Printf("archive: %s\nwork: %s\nwork ID: %s\nremoval ID: %s\ncreated: %s\npath: %s\nfiles:\n",
+			summary.Manifest.ArchiveID, summary.Manifest.WorkName, summary.Manifest.WorkID, summary.Manifest.RemovalID,
+			summary.Manifest.CreatedAt.UTC().Format(time.RFC3339), summary.Path)
+		for _, file := range summary.Manifest.Files {
+			fmt.Printf("  %s  %s  %d bytes\n", file.Name, file.SHA256, file.Size)
+		}
+		return nil
+	case "delete":
+		if len(args) < 2 || args[1] == "" {
+			return fmt.Errorf("usage: goworktree archives delete <archive-id> --confirm <archive-id>")
+		}
+		id, confirmation := args[1], flagValue(args[2:], "--confirm")
+		if confirmation == "" {
+			return fmt.Errorf("archive deletion requires --confirm <exact-archive-id>")
+		}
+		if err := store.Delete(context.Background(), id, confirmation); err != nil {
+			return fmt.Errorf("delete removed-Work archive %q: %w", id, err)
+		}
+		fmt.Printf("deleted archive: %s\n", id)
+		return nil
+	default:
+		return fmt.Errorf("unknown archives subcommand: %s", args[0])
+	}
 }
 
 func runDoctor() error {

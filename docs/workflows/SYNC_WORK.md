@@ -37,11 +37,17 @@ resolved after independent repositories finish.
    start another rebase.
 10. Remote repository branches are never pushed, rewritten, or deleted.
 11. Sync uses standard linear rebase semantics, not `--rebase-merges`.
-12. After a manually resolved restore conflict, the recovery ref is deleted
-    only after inspection and explicit `Changes restored` confirmation. The
-    user may instead keep the backup ref.
+12. A dirty rebase or restore conflict rolls the branch back to the confirmed
+    pre-Sync OID and restores changes on the original tree. If that cannot be
+    proved, the private recovery ref remains and the repository becomes
+    `failed-known-state`.
 13. Cancellation is applied between repository steps. A running Git command is
     allowed to complete or reach its timeout before no further repository starts.
+14. Aggregate staged, unstaged, and untracked counts are display facts only.
+    Planning and destructive recovery use exact full-worktree fingerprints.
+15. A resumed process never labels an unrecorded post-crash state as
+    application-owned. Ambiguous state blocks automatic cleanup and retains the
+    private recovery ref.
 
 ## Inputs
 
@@ -75,7 +81,9 @@ through Modify Work.
 - submodule state;
 - active rebase, merge, cherry-pick, revert, bisect, or other Git operation;
 - application-owned recovery ref from an unfinished Sync;
-- recorded Sync phase and last verified checkpoint.
+- recorded Sync phase and last verified checkpoint;
+- exact initial worktree fingerprint and, after each owned mutation, the exact
+  durable fingerprint required to authorize the next cleanup step.
 
 ## Eligibility matrix
 
@@ -147,6 +155,7 @@ The plan contains:
 - remote, fetched base ref, base OID, and fetch time;
 - base relation and planned rebase action;
 - counts for staged, unstaged, and untracked paths;
+- exact complete worktree fingerprint recorded for revalidation;
 - ignored-file and submodule result;
 - whether a preservation object will be created;
 - timeout and cancellation boundary.
@@ -167,7 +176,8 @@ After a successful repository Sync:
 - file contents match the pre-Sync state except where the user explicitly
   resolved a rebase or restore conflict;
 - existing user stash entries have the same identity and order as before Sync;
-- the application recovery ref is deleted only after verification.
+- the application recovery ref is deleted only after the exact restored
+  fingerprint is durably checkpointed and revalidated.
 
 ### Recovery object
 
@@ -181,38 +191,46 @@ For a dirty repository:
 5. Restore the user's stash list to its pre-Sync identity and order before
    beginning rebase.
 6. Verify that tracked and included untracked working state is clean.
+7. Durably record the exact clean, operation-owned fingerprint before rebase.
 
 The application never relies on `stash@{n}` after creating the recovery object.
 The reserved recovery ref keeps the object reachable until restoration is
 verified or the user explicitly removes the Work.
 
+The ref name is deterministic:
+
+```text
+refs/goworktree/recovery/<work-id>/<operation-id>/<repo-id-hash>
+```
+
 If preservation cannot be verified, that repository is not rebased.
+
+Schema v3 stores the initial fingerprint in the plan and operation-owned and
+restored fingerprints in repository checkpoints. An unfinished dirty schema-v1
+or schema-v2 operation without the required exact fingerprint is not upgraded
+into destructive authority: automatic cleanup stops and its recovery ref is
+preserved for manual repair.
 
 ## Per-repository phases
 
 ```text
-queued
-fetch-failed
-unchanged
-preserving
+pending
+preserve-intent
 preserved
-rebasing
+rebase-intent
 rebase-conflict
-restoring
-restore-conflict
-verifying
-succeeded
-blocked
+rebased
+restore-intent
+completed
 failed-known-state
-interrupted
 ```
 
 ## Per-repository mutation
 
 For each eligible repository in stable plan order:
 
-1. Revalidate worktree identity, expected branch, pre-Sync HEAD, base object, and
-   working-state inventory.
+1. Revalidate worktree identity, expected branch, pre-Sync HEAD, base object,
+   and exact full-worktree fingerprint. Counts are not used for authorization.
 2. If the working state changed after confirmation, invalidate only that
    repository's plan and report `state-conflict`; continue the batch.
 3. If dirty, create and verify the application recovery object.
@@ -237,7 +255,10 @@ For each eligible repository in stable plan order:
 6. Inspect Git operation state and HEAD.
 7. If rebase succeeded, restore the recovery object with index state.
 8. Inspect conflicts, working state, expected branch, and resulting graph.
-9. Checkpoint the repository outcome.
+9. Durably checkpoint the exact operation-owned or restored fingerprint before
+   any reset, clean, or recovery-ref deletion that depends on it.
+10. Revalidate that fingerprint immediately before the destructive step.
+11. Checkpoint the repository outcome.
 
 Repositories classified as `equal` or `contains-base` still restore preserved
 state if preservation already occurred, but an implementation should avoid
@@ -297,23 +318,18 @@ An application-owned Abort action is not implemented yet. Running `git rebase
 separate recovery decision; the UI therefore does not present manual abort as
 the normal conflict workflow.
 
-### Restore conflict
+### Dirty rebase or restore conflict
 
-A restore conflict means rebase finished but application-owned pre-Sync changes
-could not be applied cleanly.
-
-The screen shows:
-
-- conflicted paths;
-- post-rebase HEAD;
-- recovery-object OID/ref;
-- actions: Open, Reinspect, Mark Resolved when eligible, Keep Recovery Backup.
-
-The application does not rerun restore blindly. After manual resolution,
-`Changes restored` is enabled only when inspection finds no unmerged index
-entries. Explicit confirmation records the final inventory and permits deletion
-of the private recovery ref. `Keep backup` leaves the ref reachable and reports
-its exact name.
+For an originally dirty worktree, the application does not leave a mixed
+rebase/restore conflict for manual resolution. It aborts any owned rebase,
+resets the exact branch to the recorded pre-Sync OID, cleans partial restore
+output, and applies the private recovery OID with index state on that original
+tree only while the current exact fingerprint still matches a durable
+operation-owned checkpoint. The private ref is compare-and-deleted only after
+HEAD and the exact restored fingerprint are durably recorded and revalidated.
+If a crash occurred before an owned fingerprint was recorded, or any cleanup
+fact cannot be proved, no automatic reset or clean runs; the ref remains and
+Resume starts from `failed-known-state` without a new fetch.
 
 ## Repeat and Resume
 
@@ -322,7 +338,8 @@ When Sync is invoked with an unfinished Sync record:
 1. Do not fetch a new base yet.
 2. Acquire the recorded lock set and inspect every repository.
 3. Accept verified completed outcomes without repeating them.
-4. Route owned active rebases and restore conflicts to recovery.
+4. Route active rebases and restore conflicts to recovery only when their exact
+   current fingerprint matches a durable operation-owned checkpoint.
 5. Retry only steps classified as safe from their recorded intent and observed
    state.
 6. Complete or explicitly abort the old Sync operation.
@@ -335,8 +352,8 @@ conflicts are unresolved.
 
 Cancellation before mutation exits without an unfinished Sync.
 
-During batch mutation, `Ctrl+C` records `cancel-requested`. A running Git command
-is not killed immediately; it is allowed to complete or reach its configured
+During batch mutation, `Ctrl+C` requests cancellation. A running Git command is
+not killed immediately; it is allowed to complete or reach its configured
 timeout. No new repository starts after the current step reaches an inspected
 safe boundary.
 
@@ -353,11 +370,10 @@ next one.
 | --- | --- |
 | `unchanged` | Expected branch contains fetched base OID; original working state remains |
 | `succeeded` | Expected branch contains fetched base OID; no active rebase; working state restored; no application recovery ref required |
-| `rebase-conflict` | Owned rebase is active; conflict state inspected; recovery ref preserved when needed |
-| `restore-conflict` | Rebase complete; index/worktree conflict inspected; recovery ref preserved |
-| `aborted` | Pre-Sync HEAD restored; working state restored or recovery remains explicitly reported |
+| `rebase-conflict` | Originally clean worktree has an owned active rebase ready for manual resolution |
+| `rolled-back` | Originally dirty repository returned to pre-Sync HEAD and its working state was verified restored |
 | `blocked` | No branch mutation occurred for the recorded reason |
-| `failed-known-state` | Mutation may have occurred, but observed Git state and recovery actions are known |
+| `failed-known-state` | Cleanup was not proved; the exact private recovery ref remains recorded |
 | `interrupted` | Operation record remains and requires reconciliation |
 
 ## Crash reconciliation
@@ -365,10 +381,15 @@ next one.
 | Recorded phase and observed state | Classification | Recovery |
 | --- | --- | --- |
 | Before preservation; original dirty state present | no mutation | Retry repository |
-| Recovery ref exists; worktree clean; HEAD unchanged | preserved | Start recorded rebase |
-| Recovery ref exists; owned rebase active | rebase paused/interrupted | Reinspect and continue or abort |
-| Recovery ref exists; expected rebased graph observed; no active rebase | rebase succeeded before checkpoint | Start restoration |
-| Recovery ref exists; restored inventory verified | restore succeeded before checkpoint | Delete recovery ref and checkpoint |
+| Recovery ref exists; exact clean fingerprint was durably recorded; HEAD unchanged | preserved | Start recorded rebase |
+| Preservation may have completed but its exact clean result was not recorded | ambiguous preservation | Stop without rebase/cleanup and retain recovery state |
+| Recovery ref exists; active clean-worktree rebase | rebase paused | Reinspect and continue manual conflict resolution |
+| Recovery ref exists; dirty rebase has matching owned fingerprint | verified owned conflict | Abort/reset and restore from the retained ref |
+| Recovery ref exists; dirty rebase has no durable matching fingerprint | ambiguous post-crash state | Stop without reset/clean and retain the ref |
+| Recovery ref exists; expected rebased graph and its exact owned fingerprint were durably recorded | verified rebase | Start restoration |
+| Recovery ref exists; expected rebased graph observed without a durable post-rebase fingerprint | ambiguous rebase | Stop without restore/reset and retain the ref |
+| Recovery ref exists; exact restored fingerprint is durably recorded and still matches | restore verified | Compare-and-delete recovery ref and checkpoint |
+| Recovery apply may have completed but its exact result was not durably recorded | ambiguous restore | Stop without cleanup and retain the ref |
 | No recovery ref was needed; expected rebased graph observed | rebase succeeded | Checkpoint |
 | HEAD or branch moved outside recorded transition | external state conflict | Stop and require Repair/manual inspection |
 | Recovery ref exists without matching readable operation | invalid state | Preserve ref and require Repair |
@@ -393,7 +414,10 @@ next one.
 - ignored-file collision;
 - dirty submodule;
 - preservation failure before rebase;
-- exact staged/unstaged/untracked restoration after rebase.
+- exact staged/unstaged/untracked restoration after rebase;
+- content changes that preserve staged/unstaged/untracked counts;
+- tracked, untracked, ignored, executable-bit, symlink, and empty-directory
+  fingerprint changes.
 
 ### Conflicts and batch
 
@@ -412,6 +436,11 @@ next one.
 - interruption during and after rebase;
 - interruption during and after restoration;
 - successful Git command before missing checkpoint;
+- user edits after a crash in an active dirty rebase remain untouched;
+- crash after recovery apply but before durable restored fingerprint retains the
+  recovery ref and performs no automatic cleanup;
+- unfinished dirty schema-v1 and schema-v2 records without exact fingerprints
+  fail safe;
 - cancellation between repositories;
 - timeout with process running, stopped, conflicted, and successfully completed;
 - operation-record write failure stops later repository mutations;

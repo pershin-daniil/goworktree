@@ -14,6 +14,7 @@ import (
 	"github.com/pershin-daniil/goworktree/internal/work"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 )
 
 const systemInspectionParallelism = 8
@@ -26,11 +27,22 @@ type OperationReader interface {
 	Load(string) (newwork.OperationRecord, error)
 }
 
+type RemoveOperationReader interface {
+	LoadActive(string) (removework.ActiveRecord, error)
+}
+
+type systemRemoveOperationReader struct{}
+
+func (systemRemoveOperationReader) LoadActive(path string) (removework.ActiveRecord, error) {
+	return removework.LoadActive(path)
+}
+
 type Inspector struct {
-	Works       WorkInspector
-	Operations  OperationReader
-	Now         func() time.Time
-	Parallelism int
+	Works            WorkInspector
+	Operations       OperationReader
+	RemoveOperations RemoveOperationReader
+	Now              func() time.Time
+	Parallelism      int
 }
 
 func NewSystemInspector() Inspector {
@@ -41,8 +53,9 @@ func NewSystemInspector() Inspector {
 			Operations: inspectwork.SystemOperationReader{},
 			Limiter:    limiter,
 		},
-		Operations:  inspectwork.SystemOperationReader{},
-		Parallelism: systemInspectionParallelism,
+		Operations:       inspectwork.SystemOperationReader{},
+		RemoveOperations: systemRemoveOperationReader{},
+		Parallelism:      systemInspectionParallelism,
 	}
 }
 
@@ -83,7 +96,8 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	if worksRootExists {
 		i.discoverDirectories(&snapshot, candidates)
 	}
-	i.discoverOperations(&snapshot, candidates)
+	i.discoverNewWorkOperations(&snapshot, candidates)
+	i.discoverRemoveWorkOperations(&snapshot, candidates)
 
 	names := make([]string, 0, len(candidates))
 	for name := range candidates {
@@ -175,7 +189,7 @@ func (i Inspector) discoverDirectories(snapshot *Snapshot, candidates map[string
 	}
 }
 
-func (i Inspector) discoverOperations(snapshot *Snapshot, candidates map[string]*Work) {
+func (i Inspector) discoverNewWorkOperations(snapshot *Snapshot, candidates map[string]*Work) {
 	directory := filepath.Join(snapshot.ControlRoot, "operations", "new-work")
 	entries, err := os.ReadDir(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -214,8 +228,7 @@ func (i Inspector) discoverOperations(snapshot *Snapshot, candidates map[string]
 			})
 			continue
 		}
-		recordWorksRoot, _, rootErr := canonicalOptionalDirectory(filepath.Dir(filepath.Clean(record.Plan.WorkRoot)))
-		if rootErr != nil || recordWorksRoot != snapshot.WorksRoot {
+		if !validOperationWorkRoot(snapshot.WorksRoot, name, record.Plan.WorkRoot) {
 			snapshot.Problems = append(snapshot.Problems, Problem{
 				Code: ProblemOperationOutsideWorksRoot, Name: name, Path: path,
 				Message: fmt.Sprintf("operation Work root %s is outside configured works root", record.Plan.WorkRoot),
@@ -225,6 +238,72 @@ func (i Inspector) discoverOperations(snapshot *Snapshot, candidates map[string]
 		entry := candidate(candidates, name, filepath.Join(snapshot.WorksRoot, name))
 		entry.FromOperation = true
 	}
+}
+
+func (i Inspector) discoverRemoveWorkOperations(snapshot *Snapshot, candidates map[string]*Work) {
+	directory := filepath.Join(snapshot.ControlRoot, "operations", "remove-work")
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		snapshot.Problems = append(snapshot.Problems, Problem{
+			Code: ProblemOperationDirectoryUnread, Path: directory, Message: err.Error(),
+		})
+		return
+	}
+	reader := i.RemoveOperations
+	if reader == nil {
+		reader = systemRemoveOperationReader{}
+	}
+	for _, operationEntry := range entries {
+		path := filepath.Join(directory, operationEntry.Name())
+		info, infoErr := operationEntry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || !strings.HasSuffix(operationEntry.Name(), ".json") {
+			message := "operation entry is not a regular JSON file"
+			if infoErr != nil {
+				message = infoErr.Error()
+			}
+			snapshot.Problems = append(snapshot.Problems, Problem{
+				Code: ProblemOperationEntryUnsafe, Path: path, Message: message,
+			})
+			continue
+		}
+		record, loadErr := reader.LoadActive(path)
+		if loadErr != nil {
+			snapshot.Problems = append(snapshot.Problems, Problem{
+				Code: ProblemOperationRecordInvalid, Path: path, Message: loadErr.Error(),
+			})
+			continue
+		}
+		name := record.WorkName
+		parsedName, parseErr := work.ParseName(name)
+		if parseErr != nil {
+			snapshot.Problems = append(snapshot.Problems, Problem{
+				Code: ProblemOperationRecordInvalid, Name: name, Path: path, Message: parseErr.Error(),
+			})
+			continue
+		}
+		if !validOperationWorkRoot(snapshot.WorksRoot, name, record.WorkRoot) ||
+			record.WorkID != work.NewIdentity(snapshot.WorksRoot, parsedName).String() {
+			snapshot.Problems = append(snapshot.Problems, Problem{
+				Code: ProblemOperationOutsideWorksRoot, Name: name, Path: path,
+				Message: fmt.Sprintf("Remove Work root %s is outside configured works root or has a mismatched identity", record.WorkRoot),
+			})
+			continue
+		}
+		entry := candidate(candidates, name, filepath.Join(snapshot.WorksRoot, name))
+		entry.FromOperation = true
+	}
+}
+
+func validOperationWorkRoot(worksRoot, name, recordRoot string) bool {
+	cleanRoot := filepath.Clean(recordRoot)
+	if filepath.Base(cleanRoot) != name {
+		return false
+	}
+	parent, _, err := canonicalOptionalDirectory(filepath.Dir(cleanRoot))
+	return err == nil && parent == worksRoot
 }
 
 func candidate(candidates map[string]*Work, name, root string) *Work {

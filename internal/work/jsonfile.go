@@ -185,6 +185,12 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
+// SyncDirectory persists directory entry changes made by workflow state
+// machines. Callers must validate that path is an owned directory first.
+func SyncDirectory(path string) error {
+	return syncDirectory(path)
+}
+
 func atomicTempPrefix(targetName string) string {
 	if strings.HasPrefix(targetName, ".") {
 		return targetName + "-"
