@@ -4,29 +4,18 @@ silent: true
 
 vars:
   BINARY: goworktree
+  TOOLS_BIN: '{{.ROOT_DIR}}/.tools/bin'
+  GOLANGCI_LINT: '{{.TOOLS_BIN}}/golangci-lint'
+  GOLANGCI_LINT_VERSION: 2.12.2
 
 tasks:
   default:
-    desc: Quickstart — build and show next steps
+    desc: Run the canonical development pipeline
     cmds:
-      - task: build
-      - task: check-deps
-      - |
-        echo ""
-        echo "Quickstart:"
-        echo "  ./{{.BINARY}}             unified interactive dashboard"
-        echo "  task init              interactive setup"
-        echo "  task start -- my-proj --repos api,web  create / resume project"
-        echo "  task add / task drop   change repos in a project"
-        echo "  task sync -- my-proj   rebase project branches"
-        echo "  task branch -- my-proj repo  adopt current worktree branch"
-        echo "  task list              list projects"
-        echo "  task doctor            check deps"
-        echo "  task repair -- my-proj repair project state"
-        echo "  task install           install to \$GOPATH/bin"
-        echo ""
-        echo "Run CLI directly:"
-        echo "  ./{{.BINARY}} help"
+      - task: tidy
+      - task: fmt
+      - task: lint
+      - task: test
 
   build:
     desc: Build binary to ./{{.BINARY}}
@@ -71,7 +60,7 @@ tasks:
       - ./{{.BINARY}} init
 
   start:
-    desc: Create worktree project (pass name via CLI_ARGS)
+    desc: Create or resume typed New Work (pass name and --repos via CLI_ARGS)
     deps: [build]
     cmds:
       - ./{{.BINARY}} start {{.CLI_ARGS}}
@@ -89,7 +78,7 @@ tasks:
       - ./{{.BINARY}} drop {{.CLI_ARGS}}
 
   sync:
-    desc: Rebase project branches onto origin bases
+    desc: Run typed Sync Work against fetched immutable base OIDs
     deps: [build]
     cmds:
       - ./{{.BINARY}} sync {{.CLI_ARGS}}
@@ -107,10 +96,16 @@ tasks:
       - ./{{.BINARY}} list
 
   remove:
-    desc: Remove a worktree project group (picker if no name)
+    desc: Run typed Remove Work (--confirm must equal the exact Work name)
     deps: [build]
     cmds:
       - ./{{.BINARY}} remove {{.CLI_ARGS}}
+
+  archives:
+    desc: List, inspect, or delete removed-Work metadata archives
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} archives {{.CLI_ARGS}}
 
   doctor:
     desc: Check git, editors, and config
@@ -119,7 +114,7 @@ tasks:
       - ./{{.BINARY}} doctor
 
   repair:
-    desc: Reconcile a project manifest and worktrees
+    desc: Apply deterministic typed Repair Work actions
     deps: [build]
     cmds:
       - ./{{.BINARY}} repair {{.CLI_ARGS}}
@@ -151,7 +146,52 @@ tasks:
   fmt:
     desc: Format Go code
     cmds:
-      - go fmt ./...
+      - gofmt -w .
+
+  fmt:check:
+    desc: Check Go formatting without changing files
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "Go files require formatting:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+  tools:install:
+    desc: Install pinned development tools into .tools/bin
+    status:
+      - test -x "{{.GOLANGCI_LINT}}"
+      - '"{{.GOLANGCI_LINT}}" version 2>&1 | grep -q "version {{.GOLANGCI_LINT_VERSION}} "'
+    cmds:
+      - mkdir -p "{{.TOOLS_BIN}}"
+      - 'curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "{{.TOOLS_BIN}}" v{{.GOLANGCI_LINT_VERSION}}'
+
+  lint:
+    desc: Run pinned local static analysis
+    preconditions:
+      - sh: test -x "{{.GOLANGCI_LINT}}"
+        msg: "local golangci-lint is missing; run: task tools:install"
+    cmds:
+      - |
+        version_output="$("{{.GOLANGCI_LINT}}" version 2>&1)"
+        case "$version_output" in
+          *"version {{.GOLANGCI_LINT_VERSION}} "*) ;;
+          *)
+            echo "golangci-lint {{.GOLANGCI_LINT_VERSION}} is required"
+            echo "$version_output"
+            exit 1
+            ;;
+        esac
+      - '"{{.GOLANGCI_LINT}}" run ./...'
+
+  check:
+    desc: Run deterministic local quality checks
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: test
 
   vet:
     desc: Run go vet

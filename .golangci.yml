@@ -1,0 +1,35 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  relative-path-mode: gomod
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -QF* # Optional rewrites are not correctness checks.
+        - -ST1000
+        - -ST1003
+        - -ST1005 # Work and Git are intentional user-facing product terms.
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

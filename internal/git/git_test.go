@@ -217,6 +217,21 @@ func TestSyncWorktreeRebasesDivergedBranch(t *testing.T) {
 	}
 }
 
+func TestSyncWorktreeIgnoresStaleRebaseHead(t *testing.T) {
+	_, seed, work := setupSyncRepos(t)
+	writeCommitPush(t, seed, "remote.txt", "remote\n", "remote update")
+	gitTestRun(t, work, "update-ref", "REBASE_HEAD", "HEAD")
+
+	if rebaseInProgress(work) {
+		t.Fatal("stale REBASE_HEAD was treated as an active rebase")
+	}
+	result := SyncWorktree(work, "ticket", "main")
+	if result.Status != SyncRebased || result.Err != nil {
+		t.Fatalf("SyncWorktree = %+v", result)
+	}
+	gitTestRun(t, work, "merge-base", "--is-ancestor", "origin/main", "HEAD")
+}
+
 func TestSyncWorktreeLeavesConflictingRebaseForResolutionAndRetries(t *testing.T) {
 	_, seed, work := setupSyncRepos(t)
 	if err := os.WriteFile(filepath.Join(work, "shared.txt"), []byte("ticket change\n"), 0o644); err != nil {

@@ -277,27 +277,94 @@ func SyncWorktree(repo, expectedBranch, base string) SyncResult {
 // SyncWorktreeContext lets callers bound fetch/rebase time and cancel an
 // interactive operation without leaving Git subprocesses running.
 func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string) SyncResult {
-	result := SyncResult{Status: SyncFailed}
 	if strings.TrimSpace(base) == "" {
-		result.Err = fmt.Errorf("base branch is empty")
-		return result
+		return SyncResult{Status: SyncFailed, Err: fmt.Errorf("base branch is empty")}
 	}
 	// During a rebase HEAD is detached, so this must run before normal branch
 	// validation. The expected branch was validated when the rebase began.
 	if rebaseInProgress(repo) {
-		if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
-			if rebaseInProgress(repo) {
-				result.Status = SyncConflict
-				result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry sync: %w", err)
-				return result
-			}
-			result.Err = fmt.Errorf("continue rebase: %w", err)
+		return ContinueRebaseContext(ctx, repo, expectedBranch, "")
+	}
+	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
+		return SyncResult{Status: SyncFailed, Err: err}
+	}
+	target := remoteBase(base)
+	to, err := revision(repo, target)
+	if err != nil {
+		return SyncResult{Status: SyncFailed, Err: fmt.Errorf("base %s: %w", target, err)}
+	}
+	return RebaseWorktreeToOIDContext(ctx, repo, expectedBranch, to)
+}
+
+// ContinueRebaseContext continues an already active rebase owned by a persisted
+// workflow. Callers must establish that ownership before invoking it.
+func ContinueRebaseContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	result := SyncResult{Status: SyncFailed}
+	if !rebaseInProgress(repo) {
+		result.Err = fmt.Errorf("no rebase is active")
+		return result
+	}
+	if _, err := runContext(ctx, repo, "-c", "core.editor=true", "rebase", "--continue"); err != nil {
+		if rebaseInProgress(repo) {
+			result.Status = SyncConflict
+			result.Err = fmt.Errorf("rebase conflict remains; resolve it, stage the files, then retry Sync Work: %w", err)
 			return result
 		}
-		result.Status = SyncRebased
-		if head, err := revision(repo, "HEAD"); err == nil {
-			result.To = head
+		result.Err = fmt.Errorf("continue rebase: %w", err)
+		return result
+	}
+	branch, err := CurrentBranch(repo)
+	expectedBranch = strings.TrimPrefix(expectedBranch, "refs/heads/")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		result.Err = fmt.Errorf("continued rebase returned to branch %q, expected %q", branch, expectedBranch)
+		return result
+	}
+	head, err := revision(repo, "HEAD")
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if baseOID != "" {
+		based, err := IsAncestorContext(ctx, repo, baseOID, head)
+		if err != nil {
+			result.Err = err
+			return result
 		}
+		if !based {
+			result.Err = fmt.Errorf("continued rebase result is not based on planned commit %s", shortRevision(baseOID))
+			return result
+		}
+	}
+	result.Status, result.To = SyncRebased, head
+	return result
+}
+
+// RebaseWorktreeToOIDContext rebases onto one immutable commit without
+// fetching. It preserves staged, unstaged, and untracked changes around the
+// rebase and never addresses a user stash by a mutable selector.
+func RebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	return rebaseWorktreeToOIDContext(ctx, repo, expectedBranch, baseOID, true)
+}
+
+// RebaseCleanWorktreeToOIDContext rebases only a verified clean worktree. It
+// never creates an auto-stash; durable preservation belongs to Sync Work's
+// private recovery-ref state machine.
+func RebaseCleanWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string) SyncResult {
+	return rebaseWorktreeToOIDContext(ctx, repo, expectedBranch, baseOID, false)
+}
+
+func rebaseWorktreeToOIDContext(ctx context.Context, repo, expectedBranch, baseOID string, preserveDirty bool) SyncResult {
+	result := SyncResult{Status: SyncFailed, To: baseOID}
+	if strings.TrimSpace(baseOID) == "" {
+		result.Err = fmt.Errorf("base commit is empty")
+		return result
+	}
+	if rebaseInProgress(repo) {
+		result.Err = fmt.Errorf("rebase is already active")
 		return result
 	}
 	branch, err := CurrentBranch(repo)
@@ -309,11 +376,11 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		result.Err = fmt.Errorf("detached HEAD")
 		return result
 	}
+	expectedBranch = strings.TrimPrefix(expectedBranch, "refs/heads/")
 	if expectedBranch != "" && branch != expectedBranch {
 		result.Err = fmt.Errorf("current branch %q, expected %q", branch, expectedBranch)
 		return result
 	}
-
 	from, err := revision(repo, "HEAD")
 	if err != nil {
 		result.Err = err
@@ -321,19 +388,7 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	}
 	result.From = from
 
-	if _, err := runContext(ctx, repo, "fetch", "origin"); err != nil {
-		result.Err = err
-		return result
-	}
-	target := remoteBase(base)
-	to, err := revision(repo, target)
-	if err != nil {
-		result.Err = fmt.Errorf("base %s: %w", target, err)
-		return result
-	}
-	result.To = to
-
-	alreadyBased, err := isAncestor(repo, to, from)
+	alreadyBased, err := IsAncestorContext(ctx, repo, baseOID, from)
 	if err != nil {
 		result.Err = err
 		return result
@@ -346,6 +401,10 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 	dirty, err := isDirty(repo)
 	if err != nil {
 		result.Err = err
+		return result
+	}
+	if dirty && !preserveDirty {
+		result.Err = fmt.Errorf("working tree is dirty after preservation")
 		return result
 	}
 	stashed := false
@@ -373,10 +432,15 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		return dropStash(repo, stashRef)
 	}
 
-	if _, err := runContext(ctx, repo, "rebase", target); err != nil {
+	if _, err := runContext(ctx, repo,
+		"-c", "rebase.autoStash=false",
+		"-c", "rebase.updateRefs=false",
+		"-c", "rerere.autoupdate=false",
+		"rebase", "--no-autostash", "--no-rebase-merges", "--no-update-refs", "--no-rerere-autoupdate", "--verify", baseOID,
+	); err != nil {
 		if !stashed && rebaseInProgress(repo) {
 			result.Status = SyncConflict
-			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it, stage the files, then retry sync", target)
+			result.Err = fmt.Errorf("rebase onto %s conflicted; resolve it and finish or abort the rebase", shortRevision(baseOID))
 			return result
 		}
 		_, _ = run(repo, "rebase", "--abort")
@@ -386,7 +450,7 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 			return result
 		}
 		result.Status = SyncRolledBack
-		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", target, shortRevision(from))
+		result.Err = fmt.Errorf("rebase onto %s conflicted; rolled back to %s", shortRevision(baseOID), shortRevision(from))
 		result.To = from
 		return result
 	}
@@ -408,14 +472,39 @@ func SyncWorktreeContext(ctx context.Context, repo, expectedBranch, base string)
 		return result
 	}
 	result.Status = SyncRolledBack
-	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", target, from)
+	result.Err = fmt.Errorf("local changes conflict with %s; rolled back to %s", shortRevision(baseOID), from)
 	result.To = from
 	return result
 }
 
+// IsAncestorContext reports whether older is an ancestor of newer.
+func IsAncestorContext(ctx context.Context, repo, older, newer string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", older, newer)
+	cmd.Dir = repo
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return false, fmt.Errorf("git merge-base --is-ancestor: %w", contextErr)
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
+}
+
 func rebaseInProgress(repo string) bool {
-	_, err := run(repo, "rev-parse", "-q", "--verify", "REBASE_HEAD")
-	return err == nil
+	operations, err := ActiveOperationsContext(context.Background(), repo)
+	if err != nil {
+		return false
+	}
+	for _, operation := range operations {
+		if operation == OperationRebase {
+			return true
+		}
+	}
+	return false
 }
 
 func shortRevision(revision string) string {
@@ -458,19 +547,6 @@ func dropStash(repo, objectID string) error {
 func isDirty(repo string) (bool, error) {
 	out, err := run(repo, "status", "--porcelain", "--untracked-files=normal")
 	return strings.TrimSpace(out) != "", err
-}
-
-func isAncestor(repo, older, newer string) (bool, error) {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", older, newer)
-	cmd.Dir = repo
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
 // ScanRepos walks root up to maxDepth levels and returns primary clones only.
@@ -530,11 +606,14 @@ func runContext(ctx context.Context, dir string, args ...string) (string, error)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), contextErr)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), msg, err)
 	}
 	return string(out), nil
 }

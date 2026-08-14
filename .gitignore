@@ -2,6 +2,7 @@
 /goworktree
 /bin/
 /dist/
+/.tools/
 
 # Go
 *.exe

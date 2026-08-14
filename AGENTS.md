@@ -15,11 +15,22 @@
 
 ## Development workflow
 
-- Format changed Go files with `gofmt` (or run `task fmt`).
-- Run `go test ./...` after behavior changes; use `task test` when Task is installed.
+- Install pinned repository-local development tools with `task tools:install`.
+- The canonical baseline pipeline is the default `task` command. Run it before handing off changes; it executes `tidy`, `fmt`, `lint`, and `test` in that exact order.
+- `task` may update Go source formatting and module metadata. Review resulting changes to `go.mod`, `go.sum`, and formatted files before committing.
+- Use `task check` when a non-mutating formatting, lint, and test gate is required.
 - Run `go vet ./...` for changes that touch command execution, filesystem operations, or concurrency.
-- Run `go mod tidy` only when imports or dependencies change, and review both `go.mod` and `go.sum` afterward.
 - Do not commit the generated root binary `goworktree`.
+
+## AI agent workflow
+
+- The primary agent owns repository discovery, planning, architecture, risk decisions, integration, final review, and final verification.
+- Work directly on small or tightly coupled changes. Delegation is useful only when the task contains at least two genuinely independent workstreams or a slow investigation can run independently.
+- When delegation is useful, run no more than three subagents in parallel. Do not let subagents create further subagents.
+- Prefer `gpt-5.6-terra` with medium reasoning for bounded implementation, tests, documentation, and mechanical changes when that model override is available. Keep architecture, ambiguous work, and final review with the primary model; fall back to the available model rather than blocking on model selection.
+- Give every subagent a bounded brief containing the expected result, allowed files or packages, relevant constraints, required validation, and the expected handoff. Assign exclusive file ownership and never allow concurrent edits to the same file.
+- Require subagents to report changed files, commands and tests run, failures, assumptions, and remaining risks. Subagents must not commit unless the user explicitly asks for commits.
+- After delegated work, the primary agent must inspect the combined diff, resolve inconsistencies, verify that user-facing documentation remains synchronized, and run the repository's required checks. Passing worker tests is not a substitute for final integration verification.
 
 ## Design and safety constraints
 

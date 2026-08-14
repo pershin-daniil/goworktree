@@ -25,6 +25,8 @@ func applyVimListKeys(l *list.Model) {
 	l.KeyMap.CursorDown = key.NewBinding(key.WithKeys("j", "down", "ctrl+n"), key.WithHelp("j", "down"))
 	l.KeyMap.GoToStart = key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top"))
 	l.KeyMap.GoToEnd = key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom"))
+	l.KeyMap.PrevPage = key.NewBinding(key.WithKeys("ctrl+u", "pgup"), key.WithHelp("ctrl+u", "page up"))
+	l.KeyMap.NextPage = key.NewBinding(key.WithKeys("ctrl+d", "pgdown"), key.WithHelp("ctrl+d", "page down"))
 	l.KeyMap.Filter = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
 }
 
@@ -72,7 +74,7 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 		title = labelStyle.Underline(true).Bold(true).Render(it.Title)
 	}
 
-	fmt.Fprintf(w, "%s%s%s\n    %s", cursor, mark, title, desc)
+	_, _ = fmt.Fprintf(w, "%s%s%s\n    %s", cursor, mark, title, desc)
 }
 
 type pickerKeyMap struct {

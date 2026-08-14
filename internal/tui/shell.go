@@ -40,7 +40,6 @@ type shellModel struct {
 	actions  ShellActions
 	choice   string
 	quitting bool
-	err      error
 }
 
 func newShellModel(actions ShellActions) shellModel {
