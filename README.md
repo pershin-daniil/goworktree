@@ -143,7 +143,7 @@ goworktree programs default vscode
 goworktree programs delete vscode
 ```
 
-`search` lists executable files from `PATH`; `add` and `update` require a runnable executable path or a command resolvable from `PATH`. Programs receive the project folder as their final argument. For macOS apps that need LaunchServices, use arguments, for example: `goworktree programs update codex-id-1 --path open --args "-a Codex"`.
+`search` lists executable files from `PATH`; `add` and `update` require a runnable executable path or a command resolvable from `PATH`. Programs receive the project folder as their final argument. To open Codex Desktop, use its CLI launcher: `goworktree programs update codex-id-1 --path codex --args app`. A macOS application can also be launched by exact bundle path, for example: `--path open --args "-a /Applications/Codex.app"`.
 
 `conflict_program` selects the program opened automatically at the exact
 repository when Sync leaves a rebase conflict. When omitted, it follows

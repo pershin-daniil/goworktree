@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -772,11 +773,39 @@ func openProgram(cfg *config.Config, id, dir string) error {
 	}
 	args := append(append([]string(nil), program.Args...), abs)
 	cmd := exec.Command(program.Path, args...)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	cmd.Stdout = io.Discard
+	if waitForLauncher(program) {
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("open %s: %w: %s", program.Name, err, detail)
+			}
+			return fmt.Errorf("open %s: %w", program.Name, err)
+		}
+		return nil
+	}
+	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("open %s: %w", program.Name, err)
 	}
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("detach %s: %w", program.Name, err)
+	}
 	return nil
+}
+
+// waitForLauncher identifies commands whose only job is to hand the folder to
+// another application. Waiting for these short-lived launchers lets us report
+// their real exit status instead of treating a successful fork as a successful
+// open operation.
+func waitForLauncher(program config.Program) bool {
+	name := strings.ToLower(filepath.Base(program.Path))
+	if name == "open" || name == "open.exe" || name == "xdg-open" {
+		return true
+	}
+	return (name == "codex" || name == "codex.exe") && len(program.Args) > 0 && program.Args[0] == "app"
 }
 
 func runList() error {
