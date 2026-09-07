@@ -49,9 +49,10 @@ func NewSystemInspector() Inspector {
 	limiter := inspectwork.NewRepositoryLimiter(systemInspectionParallelism)
 	return Inspector{
 		Works: inspectwork.Inspector{
-			Git:        inspectwork.SystemGit{},
-			Operations: inspectwork.SystemOperationReader{},
-			Limiter:    limiter,
+			Git:              inspectwork.SystemGit{},
+			Operations:       inspectwork.SystemOperationReader{},
+			ChangeOperations: inspectwork.SystemChangeOperationReader{},
+			Limiter:          limiter,
 		},
 		Operations:       inspectwork.SystemOperationReader{},
 		RemoveOperations: systemRemoveOperationReader{},

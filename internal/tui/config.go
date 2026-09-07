@@ -82,6 +82,17 @@ func conflictProgramLabel(cfg *config.Config) string {
 	return label
 }
 
+func programLabel(cfg *config.Config, program string) string {
+	if program == "" {
+		return "none enabled"
+	}
+	p, ok := cfg.Program(program)
+	if !ok {
+		return program
+	}
+	return p.Name
+}
+
 func FormatProjects(projects []project.Entry, root string) string {
 	var b strings.Builder
 	b.WriteString(Title("goworktree projects"))

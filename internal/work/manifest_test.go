@@ -43,6 +43,37 @@ func TestManifestRootModulesOnlyRejectsExplicitPaths(t *testing.T) {
 	}
 }
 
+func TestManifestAcceptsLegacyAndValidatesInactiveRepositoryOwnership(t *testing.T) {
+	t.Parallel()
+
+	legacy := validManifestForTest()
+	legacy.SchemaVersion = LegacyManifestSchemaVersion
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy manifest rejected: %v", err)
+	}
+
+	changed := validManifestForTest()
+	changed.Revision = 1
+	changed.LastChangeID = strings.Repeat("b", 32)
+	inactive := changed.Repositories[0]
+	inactive.ID = "web"
+	inactive.SourcePath = "/repos/web"
+	inactive.GitCommonDir = "/repos/web/.git"
+	inactive.Destination = "/works/work-1/web"
+	inactive.IncludeInGoWork = false
+	changed.InactiveRepositories = []InactiveRepositoryIntent{{
+		Repository: inactive, BranchRetained: true, BranchOID: strings.Repeat("c", 40),
+	}}
+	if err := changed.Validate(); err != nil {
+		t.Fatalf("schema-2 inactive repository rejected: %v", err)
+	}
+
+	changed.InactiveRepositories[0].Repository.ID = "api"
+	if err := changed.Validate(); err == nil {
+		t.Fatal("duplicate active/inactive repository ID was accepted")
+	}
+}
+
 func validManifestForTest() Manifest {
 	return Manifest{
 		SchemaVersion: ManifestSchemaVersion, WorkID: Identity("work-id"),

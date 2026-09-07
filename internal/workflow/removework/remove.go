@@ -57,6 +57,9 @@ type RepositoryPlan struct {
 	BranchRef, BranchOID                      string
 	WorkingTree                               gitops.WorkingTreeStatus
 	WorkingTreeFingerprint                    string
+	// BranchOnly is a retained inactive Work branch. It has no worktree to
+	// remove, but still belongs to the confirmed Remove Work operation.
+	BranchOnly bool `json:"branch_only,omitempty"`
 }
 
 type Plan struct {
@@ -87,6 +90,7 @@ type Result struct {
 }
 
 type Git interface {
+	InspectRepository(context.Context, string) (gitops.RepositoryIdentity, error)
 	InspectCheckout(context.Context, string) (gitops.Checkout, error)
 	WorktreeFingerprint(context.Context, string) (string, error)
 	ActiveOperations(context.Context, string) ([]gitops.ActiveOperation, error)
@@ -98,6 +102,9 @@ type Git interface {
 
 type SystemGit struct{}
 
+func (SystemGit) InspectRepository(ctx context.Context, path string) (gitops.RepositoryIdentity, error) {
+	return gitops.InspectRepositoryContext(ctx, path)
+}
 func (SystemGit) InspectCheckout(ctx context.Context, path string) (gitops.Checkout, error) {
 	return gitops.InspectCheckoutContext(ctx, path)
 }
@@ -179,8 +186,48 @@ func (p Planner) Build(ctx context.Context, snapshot inspectwork.Snapshot, contr
 			WorkingTreeFingerprint: fingerprint,
 		})
 	}
+	for _, inactive := range snapshot.Manifest.Value.InactiveRepositories {
+		if !inactive.BranchRetained {
+			continue
+		}
+		intent := inactive.Repository
+		identity, err := git.InspectRepository(ctx, intent.SourcePath)
+		if err != nil {
+			return Plan{}, fmt.Errorf("retained repository %s: inspect source identity: %w", intent.ID, err)
+		}
+		if identity.SourcePath != intent.SourcePath || identity.CommonDir != intent.GitCommonDir {
+			return Plan{}, fmt.Errorf("retained repository %s source identity changed", intent.ID)
+		}
+		oid, exists, err := git.LocalBranchOID(ctx, intent.SourcePath, intent.BranchRef)
+		if err != nil {
+			return Plan{}, fmt.Errorf("retained repository %s: inspect local branch: %w", intent.ID, err)
+		}
+		if exists && oid != inactive.BranchOID {
+			return Plan{}, fmt.Errorf("retained repository %s branch changed after it was removed from Work", intent.ID)
+		}
+		registrations, err := git.ListWorktrees(ctx, intent.SourcePath)
+		if err != nil {
+			return Plan{}, fmt.Errorf("retained repository %s: inspect worktree registrations: %w", intent.ID, err)
+		}
+		if branchRegistered(registrations, intent.BranchRef) {
+			return Plan{}, fmt.Errorf("retained repository %s branch is checked out elsewhere", intent.ID)
+		}
+		plan.Repositories = append(plan.Repositories, RepositoryPlan{
+			ID: intent.ID, SourcePath: intent.SourcePath, GitCommonDir: intent.GitCommonDir,
+			BranchRef: intent.BranchRef, BranchOID: inactive.BranchOID, BranchOnly: true,
+		})
+	}
 	sort.Slice(plan.Repositories, func(i, j int) bool { return plan.Repositories[i].ID < plan.Repositories[j].ID })
 	return plan, nil
+}
+
+func branchRegistered(registrations []gitops.WorktreeRegistration, branchRef string) bool {
+	for _, registration := range registrations {
+		if registration.Branch == branchRef {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Planner) git() Git {
@@ -499,6 +546,7 @@ func (e Executor) Execute(ctx context.Context, plan Plan, confirmation string) (
 	summary, err := e.archiver(plan).Publish(archiveops.PublishRequest{
 		ArchiveID: record.ArchiveID, WorkName: plan.WorkName, WorkID: plan.WorkID, RemovalID: record.RemovalID,
 		CreatedAt: e.now().UTC(), NewWorkRecord: newWorkRecord(plan), SyncWorkRecord: syncWorkRecord(plan),
+		ChangeWorkRecord: changeWorkRecord(plan),
 		RemoveWorkRecord: plan.OperationRecord,
 	})
 	if err != nil {
@@ -578,6 +626,13 @@ func (e Executor) inspectWorktree(ctx context.Context, plan RepositoryPlan) (wor
 
 func (e Executor) removeWorktree(ctx context.Context, record *operationRecord, index int) error {
 	checkpoint, plan := &record.Repositories[index], record.Plan.Repositories[index]
+	if plan.BranchOnly {
+		if checkpoint.Worktree == StepCompleted {
+			return nil
+		}
+		checkpoint.Worktree = StepCompleted
+		return e.save(*record)
+	}
 	if checkpoint.Worktree == StepCompleted {
 		return nil
 	}
@@ -648,6 +703,22 @@ func (e Executor) removeBranch(ctx context.Context, record *operationRecord, ind
 	checkpoint, plan := &record.Repositories[index], record.Plan.Repositories[index]
 	if checkpoint.Branch == StepCompleted {
 		return nil
+	}
+	if plan.BranchOnly {
+		identity, err := e.Git.InspectRepository(ctx, plan.SourcePath)
+		if err != nil {
+			return fmt.Errorf("inspect retained repository source: %w", err)
+		}
+		if identity.SourcePath != plan.SourcePath || identity.CommonDir != plan.GitCommonDir {
+			return fmt.Errorf("retained repository %s source identity changed after confirmation", plan.ID)
+		}
+		registrations, err := e.Git.ListWorktrees(ctx, plan.SourcePath)
+		if err != nil {
+			return fmt.Errorf("inspect retained repository worktree registrations: %w", err)
+		}
+		if branchRegistered(registrations, plan.BranchRef) {
+			return fmt.Errorf("retained repository %s branch is checked out elsewhere", plan.ID)
+		}
 	}
 	oid, exists, err := e.Git.LocalBranchOID(ctx, plan.SourcePath, plan.BranchRef)
 	if err != nil {
@@ -884,7 +955,7 @@ func migrateAndValidate(record operationRecord, workID string) (operationRecord,
 			return record, fmt.Errorf("Remove Work operation plan has no Work root fingerprint")
 		}
 		for _, repository := range record.Plan.Repositories {
-			if repository.WorkingTreeFingerprint == "" {
+			if !repository.BranchOnly && repository.WorkingTreeFingerprint == "" {
 				return record, fmt.Errorf("Remove Work operation plan has no working tree fingerprint for repository %s", repository.ID)
 			}
 		}
@@ -938,8 +1009,8 @@ func inferredPhase(record operationRecord) Phase {
 	if record.Root == StepCompleted {
 		return PhaseArchiving
 	}
-	for _, checkpoint := range record.Repositories {
-		if checkpoint.Worktree != StepCompleted {
+	for index, checkpoint := range record.Repositories {
+		if !record.Plan.Repositories[index].BranchOnly && checkpoint.Worktree != StepCompleted {
 			return PhaseWorktrees
 		}
 	}
@@ -1014,12 +1085,17 @@ func syncWorkRecord(plan Plan) string {
 	return filepath.Join(controlRoot(plan), "operations", "sync-work", plan.WorkID+".json")
 }
 
+func changeWorkRecord(plan Plan) string {
+	return filepath.Join(controlRoot(plan), "operations", "change-work", plan.WorkID+".json")
+}
+
 func (e Executor) cleanupActiveRecords(plan Plan) error {
 	records := []struct {
 		path, point string
 	}{
 		{newWorkRecord(plan), "active-new-work-deleted"},
 		{syncWorkRecord(plan), "active-sync-work-deleted"},
+		{changeWorkRecord(plan), "active-change-work-deleted"},
 		{plan.OperationRecord, "active-remove-work-deleted"},
 	}
 	for _, record := range records {

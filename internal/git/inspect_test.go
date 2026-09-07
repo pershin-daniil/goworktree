@@ -105,6 +105,87 @@ func TestDeleteLocalBranchAtOIDRequiresExactTip(t *testing.T) {
 	}
 }
 
+func TestUpdateLocalBranchAtOIDFastForwardsUncheckedOutBranch(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "initial")
+	oldOID, _, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "checkout", "-b", "topic")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("next\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "next")
+	newOID, _, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/topic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateLocalBranchAtOIDContext(context.Background(), repo, "refs/heads/main", oldOID, newOID); err != nil {
+		t.Fatal(err)
+	}
+	observed, exists, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/main")
+	if err != nil || !exists || observed != newOID {
+		t.Fatalf("main = %q, %v, %v", observed, exists, err)
+	}
+}
+
+func TestFastForwardCheckoutAtOIDRejectsDirtyCheckout(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "initial")
+	oldOID, _, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "branch", "next")
+	inspectGitRun(t, repo, "checkout", "next")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("next\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "add", ".")
+	inspectGitRun(t, repo, "commit", "-m", "next")
+	newOID, _, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspectGitRun(t, repo, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := FastForwardCheckoutAtOIDContext(context.Background(), repo, "refs/heads/main", oldOID, newOID); err == nil {
+		t.Fatal("dirty checkout was updated")
+	}
+	observed, _, err := LocalBranchOIDContext(context.Background(), repo, "refs/heads/main")
+	if err != nil || observed != oldOID {
+		t.Fatalf("main changed to %q: %v", observed, err)
+	}
+}
+
 func TestPruneAndAttachWorktreeRestoresMissingCheckout(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {

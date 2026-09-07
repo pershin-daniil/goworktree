@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/pershin-daniil/goworktree/internal/work"
 )
@@ -21,6 +22,13 @@ type HarnessManager interface {
 }
 
 type GoWorkHarness struct{}
+
+// RenderGoWork returns the exact generated go.work content for a plan. The
+// boolean is false when the plan has no modules and therefore owns no go.work.
+func RenderGoWork(plan Plan) ([]byte, bool, error) {
+	content, checkpoint, err := expectedGoWork(plan)
+	return content, checkpoint.Generated, err
+}
 
 func (GoWorkHarness) Ensure(plan Plan) (HarnessCheckpoint, error) {
 	expected, checkpoint, err := expectedGoWork(plan)
@@ -132,10 +140,25 @@ func expectedGoWork(plan Plan) ([]byte, HarnessCheckpoint, error) {
 	var content strings.Builder
 	fmt.Fprintf(&content, "go %s\n\nuse (\n", checkpoint.GoVersion)
 	for _, path := range usePaths {
-		fmt.Fprintf(&content, "\t%s\n", path)
+		fmt.Fprintf(&content, "\t%s\n", goWorkUsePath(path))
 	}
 	content.WriteString(")\n")
 	return []byte(content.String()), checkpoint, nil
+}
+
+// goWorkUsePath preserves ordinary relative paths while quoting every path
+// whose spelling could be split or interpreted as go.work syntax. Go work
+// files use Go string literals for quoted directive arguments.
+func goWorkUsePath(path string) string {
+	if strings.ContainsAny(path, " \"'`(),[]{}") || strings.Contains(path, "//") || strings.Contains(path, "/*") {
+		return strconv.Quote(path)
+	}
+	for _, r := range path {
+		if !unicode.IsPrint(r) {
+			return strconv.Quote(path)
+		}
+	}
+	return path
 }
 
 type harnessModule struct {
@@ -145,7 +168,7 @@ type harnessModule struct {
 }
 
 func plannedHarnessModules(plan Plan) ([]harnessModule, error) {
-	if len(plan.HarnessUsePaths) > 0 {
+	if plan.HarnessExplicit || len(plan.HarnessUsePaths) > 0 {
 		modules := make([]harnessModule, 0, len(plan.HarnessUsePaths))
 		seen := make(map[string]struct{}, len(plan.HarnessUsePaths))
 		for _, usePath := range plan.HarnessUsePaths {

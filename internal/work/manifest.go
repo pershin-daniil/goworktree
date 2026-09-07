@@ -8,16 +8,30 @@ import (
 	"time"
 )
 
-const ManifestSchemaVersion = 1
+const (
+	LegacyManifestSchemaVersion = 1
+	ManifestSchemaVersion       = 2
+)
 
 type Manifest struct {
-	SchemaVersion      int                `json:"schema_version"`
-	WorkID             Identity           `json:"work_id"`
-	NewWorkOperationID string             `json:"new_work_operation_id"`
-	Name               Name               `json:"name"`
-	CreatedAt          time.Time          `json:"created_at"`
-	Repositories       []RepositoryIntent `json:"repositories"`
-	Harness            HarnessIntent      `json:"harness"`
+	SchemaVersion        int                        `json:"schema_version"`
+	WorkID               Identity                   `json:"work_id"`
+	NewWorkOperationID   string                     `json:"new_work_operation_id"`
+	Name                 Name                       `json:"name"`
+	CreatedAt            time.Time                  `json:"created_at"`
+	Revision             uint64                     `json:"revision"`
+	LastChangeID         string                     `json:"last_change_operation_id,omitempty"`
+	Repositories         []RepositoryIntent         `json:"repositories"`
+	InactiveRepositories []InactiveRepositoryIntent `json:"inactive_repositories,omitempty"`
+	Harness              HarnessIntent              `json:"harness"`
+}
+
+// InactiveRepositoryIntent retains enough ownership intent to safely attach a
+// repository again after it was removed from the active Work context.
+type InactiveRepositoryIntent struct {
+	Repository     RepositoryIntent `json:"repository"`
+	BranchRetained bool             `json:"branch_retained"`
+	BranchOID      string           `json:"branch_oid,omitempty"`
 }
 
 type RepositoryIntent struct {
@@ -39,8 +53,26 @@ type HarnessIntent struct {
 }
 
 func (m Manifest) Validate() error {
-	if m.SchemaVersion != ManifestSchemaVersion {
+	if m.SchemaVersion != LegacyManifestSchemaVersion && m.SchemaVersion != ManifestSchemaVersion {
 		return fmt.Errorf("unsupported manifest schema %d", m.SchemaVersion)
+	}
+	if m.SchemaVersion == LegacyManifestSchemaVersion &&
+		(m.Revision != 0 || m.LastChangeID != "" || len(m.InactiveRepositories) != 0) {
+		return fmt.Errorf("legacy manifest contains change-work state")
+	}
+	if m.Revision == 0 && m.LastChangeID != "" {
+		return fmt.Errorf("manifest revision zero has a change operation ID")
+	}
+	if m.Revision == 0 && len(m.InactiveRepositories) != 0 {
+		return fmt.Errorf("manifest revision zero has inactive repository intent")
+	}
+	if m.Revision > 0 {
+		if len(m.LastChangeID) != 32 {
+			return fmt.Errorf("manifest change operation ID is invalid")
+		}
+		if _, err := hex.DecodeString(m.LastChangeID); err != nil {
+			return fmt.Errorf("manifest change operation ID is invalid")
+		}
 	}
 	if m.WorkID == "" {
 		return fmt.Errorf("manifest Work ID is empty")
@@ -60,22 +92,34 @@ func (m Manifest) Validate() error {
 	if len(m.Repositories) == 0 {
 		return fmt.Errorf("manifest has no repositories")
 	}
-	seen := make(map[string]struct{}, len(m.Repositories))
+	seen := make(map[string]struct{}, len(m.Repositories)+len(m.InactiveRepositories))
 	var expectedModuleIDs []string
 	for i, repo := range m.Repositories {
-		if repo.ID == "" {
-			return fmt.Errorf("manifest repository %d has empty ID", i)
+		if err := validateRepositoryIntent(repo, fmt.Sprintf("manifest repository %d", i)); err != nil {
+			return err
 		}
 		if _, exists := seen[repo.ID]; exists {
 			return fmt.Errorf("manifest repository ID %q is duplicated", repo.ID)
 		}
 		seen[repo.ID] = struct{}{}
-		if repo.SourcePath == "" || repo.GitCommonDir == "" || repo.BaseRef == "" ||
-			repo.BaseOID == "" || repo.BranchRef == "" || repo.Destination == "" {
-			return fmt.Errorf("manifest repository %q has incomplete intent", repo.ID)
-		}
 		if repo.IncludeInGoWork {
 			expectedModuleIDs = append(expectedModuleIDs, repo.ID)
+		}
+	}
+	for i, inactive := range m.InactiveRepositories {
+		repo := inactive.Repository
+		if err := validateRepositoryIntent(repo, fmt.Sprintf("inactive manifest repository %d", i)); err != nil {
+			return err
+		}
+		if _, exists := seen[repo.ID]; exists {
+			return fmt.Errorf("manifest repository ID %q is duplicated across active and inactive intent", repo.ID)
+		}
+		seen[repo.ID] = struct{}{}
+		if inactive.BranchRetained && inactive.BranchOID == "" {
+			return fmt.Errorf("inactive manifest repository %q has no retained branch OID", repo.ID)
+		}
+		if !inactive.BranchRetained && inactive.BranchOID != "" {
+			return fmt.Errorf("inactive manifest repository %q records an OID for a deleted branch", repo.ID)
 		}
 	}
 	if m.Harness.Kind != "go.work" {
@@ -83,9 +127,6 @@ func (m Manifest) Validate() error {
 	}
 	if m.Harness.RootModulesOnly && len(m.Harness.UsePaths) > 0 {
 		return fmt.Errorf("root-modules-only harness cannot define explicit use paths")
-	}
-	if !m.Harness.RootModulesOnly && len(m.Harness.UsePaths) == 0 {
-		return fmt.Errorf("custom harness has no explicit use paths")
 	}
 	seenUsePaths := make(map[string]struct{}, len(m.Harness.UsePaths))
 	for _, usePath := range m.Harness.UsePaths {
@@ -108,6 +149,17 @@ func (m Manifest) Validate() error {
 		if m.Harness.RepositoryIDs[i] != expectedModuleIDs[i] {
 			return fmt.Errorf("manifest harness repositories do not match repository intent")
 		}
+	}
+	return nil
+}
+
+func validateRepositoryIntent(repo RepositoryIntent, label string) error {
+	if repo.ID == "" {
+		return fmt.Errorf("%s has empty ID", label)
+	}
+	if repo.SourcePath == "" || repo.GitCommonDir == "" || repo.BaseRef == "" ||
+		repo.BaseOID == "" || repo.BranchRef == "" || repo.Destination == "" {
+		return fmt.Errorf("manifest repository %q has incomplete intent", repo.ID)
 	}
 	return nil
 }

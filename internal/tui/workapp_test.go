@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/work"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
@@ -225,6 +226,155 @@ func TestWorkAppCompletesNewWorkInputPlanAndExecutionFlow(t *testing.T) {
 	}
 	if executedPlan.WorkName.String() != "ticket-99" {
 		t.Fatalf("executed plan = %+v", executedPlan)
+	}
+}
+
+func TestWorkAppAddsRepositoriesToSelectedWork(t *testing.T) {
+	snapshot := testWorksSnapshot("ticket-42")
+	workName, _ := work.ParseName("ticket-42")
+	var request changework.AddRequest
+	plan := changework.Plan{
+		Kind: changework.KindAdd, WorkName: workName, Mode: newwork.ModeOffline,
+		Repositories: []changework.RepositoryPlan{{
+			ID: "web", BranchRef: "refs/heads/ticket-42", BranchOID: strings.Repeat("b", 40),
+			Destination: "/works/ticket-42/web",
+		}},
+	}
+	model := newWorkAppModel(WorkAppActions{
+		Load:         func(context.Context) (inspectworks.Snapshot, error) { return snapshot, nil },
+		Repositories: []WorkRepositoryOption{{ID: "api", Path: "/repos/api"}, {ID: "web", Path: "/repos/web"}},
+		PlanAddRepositories: func(_ context.Context, value changework.AddRequest) (changework.Plan, error) {
+			request = value
+			return plan, nil
+		},
+		RunRepositoryChange: func(context.Context, changework.Plan) (changework.Result, error) {
+			return changework.Result{WorkName: "ticket-42", Kind: changework.KindAdd, Revision: 1}, nil
+		},
+	}, context.Background(), nil)
+	model.snapshot = snapshot
+	model.setWork("ticket-42", "")
+	model.openActionPalette()
+	selectAction(&model, actionAddRepositories)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workChangeRepositories || len(model.list.Items()) != 1 {
+		t.Fatalf("add picker: screen=%v items=%d", model.screen, len(model.list.Items()))
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	model = updated.(workAppModel)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if cmd == nil || model.screen != workOperation {
+		t.Fatalf("add planning did not start: screen=%v", model.screen)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workChangePlan || request.Mode != newwork.ModeOffline || strings.Join(request.RepositoryIDs, ",") != "web" {
+		t.Fatalf("add request = %+v, screen=%v", request, model.screen)
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if model.screen != workActionResult || !strings.Contains(model.View(), "Manifest revision") {
+		t.Fatalf("add result:\n%s", model.View())
+	}
+}
+
+func TestWorkAppDisablesRepositoryChangesForProblemsAndExhaustedCatalog(t *testing.T) {
+	snapshot := testWorksSnapshot("ticket-42")
+	model := newWorkAppModel(WorkAppActions{
+		Repositories:        []WorkRepositoryOption{{ID: "api", Path: "/repos/api"}},
+		PlanAddRepositories: func(context.Context, changework.AddRequest) (changework.Plan, error) { return changework.Plan{}, nil },
+		PlanRemoveRepositories: func(context.Context, changework.RemoveRequest) (changework.Plan, error) {
+			return changework.Plan{}, nil
+		},
+		RunRepositoryChange: func(context.Context, changework.Plan) (changework.Result, error) { return changework.Result{}, nil },
+	}, context.Background(), nil)
+	model.snapshot = snapshot
+	model.setWork("ticket-42", "")
+	model.openActionPalette()
+	selectAction(&model, actionAddRepositories)
+	item := model.list.SelectedItem().(workItem)
+	if item.blockedReason != "all configured repositories are already active" {
+		t.Fatalf("add blocked reason = %q", item.blockedReason)
+	}
+
+	snapshot.Works[0].Snapshot.Problems = []inspectwork.Problem{{Code: inspectwork.ProblemBranchMissing}}
+	model.snapshot = snapshot
+	model.setWork("ticket-42", "")
+	model.openActionPalette()
+	selectAction(&model, actionRemoveRepositories)
+	item = model.list.SelectedItem().(workItem)
+	if item.blockedReason != "resolve Work problems first" {
+		t.Fatalf("remove blocked reason = %q", item.blockedReason)
+	}
+	selectAction(&model, actionRepair)
+	item = model.list.SelectedItem().(workItem)
+	if item.blockedReason == "resolve Work problems first" {
+		t.Fatalf("Repair Work was blocked by the problems it is meant to repair")
+	}
+}
+
+func TestWorkAppRequiresExactNameWhenRemovingLocalBranches(t *testing.T) {
+	snapshot := testWorksSnapshot("ticket-42")
+	second := snapshot.Works[0].Snapshot.Repositories[0]
+	second.ID = "web"
+	second.Intent.ID = "web"
+	second.Intent.Destination = "/works/ticket-42/web"
+	snapshot.Works[0].Snapshot.Repositories = append(snapshot.Works[0].Snapshot.Repositories, second)
+	workName, _ := work.ParseName("ticket-42")
+	var request changework.RemoveRequest
+	model := newWorkAppModel(WorkAppActions{
+		Load: func(context.Context) (inspectworks.Snapshot, error) { return snapshot, nil },
+		PlanRemoveRepositories: func(_ context.Context, value changework.RemoveRequest) (changework.Plan, error) {
+			request = value
+			return changework.Plan{
+				Kind: changework.KindRemove, WorkName: workName,
+				Repositories: []changework.RepositoryPlan{{
+					ID: value.RepositoryIDs[0], BranchRef: "refs/heads/ticket-42",
+					BranchOID: strings.Repeat("a", 40), DeleteBranch: value.DeleteBranches,
+				}},
+			}, nil
+		},
+		RunRepositoryChange: func(context.Context, changework.Plan) (changework.Result, error) {
+			return changework.Result{WorkName: "ticket-42", Kind: changework.KindRemove, Revision: 1}, nil
+		},
+	}, context.Background(), nil)
+	model.snapshot = snapshot
+	model.setWork("ticket-42", "web")
+	model.openRepository("web")
+	model.openActionPalette()
+	selectAction(&model, actionRemoveRepositories)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if !model.selectedChangeRepos["web"] {
+		t.Fatal("repository detail did not preselect web")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	model = updated.(workAppModel)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	updated, _ = model.Update(cmd())
+	model = updated.(workAppModel)
+	if !request.DeleteBranches || model.screen != workChangePlan {
+		t.Fatalf("remove request = %+v, screen=%v", request, model.screen)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(workAppModel)
+	if model.screen != workChangeConfirm {
+		t.Fatalf("delete branches skipped confirmation: screen=%v", model.screen)
+	}
+}
+
+func selectAction(model *workAppModel, id string) {
+	for index, item := range model.list.Items() {
+		if value, ok := item.(workItem); ok && value.id == id {
+			model.list.Select(index)
+			return
+		}
 	}
 }
 

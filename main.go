@@ -13,6 +13,8 @@ import (
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
+	"github.com/pershin-daniil/goworktree/internal/work"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
@@ -97,10 +99,22 @@ func configuredWorkAppActions() tui.WorkAppActions {
 		Version: version, Load: inspectConfiguredWorks,
 		PlanNewWork: planConfiguredNewWork, CreateNewWork: createConfiguredNewWork,
 		ResumeNewWork: resumeConfiguredNewWork, OpenWork: openConfiguredWork,
-		OpenConflict: openConfiguredConflict,
-		PlanSyncWork: planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
+		PlanAddRepositories:    planConfiguredAddRepositories,
+		PlanRemoveRepositories: planConfiguredRemoveRepositories,
+		RunRepositoryChange:    runConfiguredRepositoryChange,
+		ResumeRepositoryChange: resumeConfiguredRepositoryChange,
+		OpenConflict:           openConfiguredConflict,
+		PlanSyncWork:           planConfiguredSyncWork, RunSyncWork: runConfiguredSyncWork,
 		PlanRemoveWork: planConfiguredRemoveWork, RunRemoveWork: runConfiguredRemoveWork,
 		PlanRepairWork: planConfiguredRepairWork, RunRepairWork: runConfiguredRepairWork,
+		LoadSourceRepos:   inspectAllConfiguredSourceRepositories,
+		FetchSourceRepos:  fetchConfiguredSourceRepositories,
+		PlanSourceUpdate:  planConfiguredSourceRepositoryUpdate,
+		RunSourceUpdate:   runConfiguredSourceRepositoryUpdate,
+		OpenSourceRepo:    openConfiguredSourceRepository,
+		AddSourceGroup:    addConfiguredSourceRepositoryGroup,
+		RemoveSourceGroup: removeConfiguredSourceRepositoryGroup,
+		ScanSourceRepos:   scanConfiguredSourceRepositories,
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -116,7 +130,7 @@ func configuredWorkAppActions() tui.WorkAppActions {
 			continue
 		}
 		actions.Repositories = append(actions.Repositories, tui.WorkRepositoryOption{
-			ID: id, Name: cfg.RepoAlias(id), Path: path,
+			ID: id, Name: cfg.RepoAlias(id), Path: path, Groups: cfg.RepoGroups(id),
 		})
 	}
 	for _, id := range cfg.EnabledPrograms() {
@@ -159,9 +173,13 @@ func planConfiguredRepairWork(ctx context.Context, name string) (repairwork.Plan
 	defer cancel()
 	snapshot, err := (inspectwork.Inspector{
 		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+		ChangeOperations: inspectwork.SystemChangeOperationReader{},
 	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
 	if err != nil {
 		return repairwork.Plan{}, err
+	}
+	if snapshot.ChangeOperation.ResumeSuggested {
+		return repairwork.Plan{}, fmt.Errorf("unfinished repository change blocks Repair Work; Resume it first")
 	}
 	return (repairwork.Planner{}).Build(snapshot)
 }
@@ -196,9 +214,13 @@ func planConfiguredRemoveWork(ctx context.Context, name string) (removework.Plan
 	defer cancel()
 	snapshot, err := (inspectwork.Inspector{
 		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+		ChangeOperations: inspectwork.SystemChangeOperationReader{},
 	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
 	if err != nil {
 		return removework.Plan{}, err
+	}
+	if snapshot.ChangeOperation.ResumeSuggested {
+		return removework.Plan{}, fmt.Errorf("unfinished repository change blocks Remove Work; Resume it first")
 	}
 	return (removework.Planner{Git: removework.SystemGit{}}).Build(operationCtx, snapshot, controlRoot)
 }
@@ -233,9 +255,13 @@ func planConfiguredSyncWork(ctx context.Context, name string) (syncwork.Plan, er
 	defer cancel()
 	snapshot, err := (inspectwork.Inspector{
 		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+		ChangeOperations: inspectwork.SystemChangeOperationReader{},
 	}).Inspect(operationCtx, inspectwork.Request{WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name})
 	if err != nil {
 		return syncwork.Plan{}, err
+	}
+	if snapshot.ChangeOperation.ResumeSuggested {
+		return syncwork.Plan{}, fmt.Errorf("unfinished repository change blocks Sync Work; Resume it first")
 	}
 	configs := make([]syncwork.RepositoryConfig, 0, len(snapshot.Repositories))
 	for _, repository := range snapshot.Repositories {
@@ -278,6 +304,169 @@ func planConfiguredNewWork(ctx context.Context, request newwork.Request) (newwor
 		Git: newwork.SystemGit{}, Locker: newwork.FileRepositoryLocker{Set: locks},
 	}
 	return planner.Build(operationCtx, catalog, request)
+}
+
+func planConfiguredAddRepositories(ctx context.Context, request changework.AddRequest) (changework.Plan, error) {
+	cfg, catalog, err := configuredChangeCatalog(ctx, request.WorkName, request.RepositoryIDs, changework.KindAdd)
+	if err != nil {
+		return changework.Plan{}, err
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return (changework.Planner{
+		Git:    changework.SystemGit{},
+		Locker: newwork.FileRepositoryLocker{Set: lockops.Set{Root: catalog.ControlRoot}},
+	}).BuildAdd(operationCtx, catalog, request)
+}
+
+func planConfiguredRemoveRepositories(ctx context.Context, request changework.RemoveRequest) (changework.Plan, error) {
+	cfg, catalog, err := configuredChangeCatalog(ctx, request.WorkName, request.RepositoryIDs, changework.KindRemove)
+	if err != nil {
+		return changework.Plan{}, err
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return (changework.Planner{Git: changework.SystemGit{}}).BuildRemove(operationCtx, catalog, request)
+}
+
+func runConfiguredRepositoryChange(ctx context.Context, plan changework.Plan) (changework.Result, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return changework.Result{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return changework.Result{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	if err := validateConfiguredChangeOperationPath(controlRoot, plan.OperationPath); err != nil {
+		return changework.Result{}, err
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	return configuredChangeExecutor(controlRoot).Execute(operationCtx, plan)
+}
+
+func resumeConfiguredRepositoryChange(ctx context.Context, operationPath string) (changework.Result, error) {
+	return resumeConfiguredChange(ctx, operationPath, nil)
+}
+
+func resumeConfiguredMatchingRepositoryChange(ctx context.Context, operationPath string, request changework.ResumeRequest) (changework.Result, error) {
+	return resumeConfiguredChange(ctx, operationPath, &request)
+}
+
+func resumeConfiguredChange(ctx context.Context, operationPath string, request *changework.ResumeRequest) (changework.Result, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return changework.Result{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return changework.Result{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	if err := validateConfiguredChangeOperationPath(controlRoot, operationPath); err != nil {
+		return changework.Result{}, err
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	executor := configuredChangeExecutor(controlRoot)
+	if request != nil {
+		return executor.ResumeMatching(operationCtx, operationPath, *request)
+	}
+	return executor.Resume(operationCtx, operationPath)
+}
+
+func validateConfiguredChangeOperationPath(controlRoot, operationPath string) error {
+	expectedDir := filepath.Join(controlRoot, "operations", "change-work")
+	if filepath.Clean(filepath.Dir(operationPath)) != filepath.Clean(expectedDir) {
+		return fmt.Errorf("Change Work operation path is outside the configured control root")
+	}
+	return nil
+}
+
+func configuredChangeExecutor(controlRoot string) changework.Executor {
+	return changework.Executor{
+		Git: changework.SystemGit{}, Locker: changework.FileLocker{Set: lockops.Set{Root: controlRoot}},
+	}
+}
+
+func configuredChangeCatalog(ctx context.Context, name string, selectedIDs []string, kind changework.Kind) (*config.Config, changework.Catalog, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, changework.Catalog{}, err
+	}
+	controlRoot, err := config.Dir()
+	if err != nil {
+		return nil, changework.Catalog{}, fmt.Errorf("resolve control root: %w", err)
+	}
+	operationCtx, cancel := configuredOperationContext(ctx, cfg)
+	defer cancel()
+	snapshot, err := (inspectwork.Inspector{
+		Git: inspectwork.SystemGit{}, Operations: inspectwork.SystemOperationReader{},
+		ChangeOperations: inspectwork.SystemChangeOperationReader{},
+	}).Inspect(operationCtx, inspectwork.Request{
+		WorksRoot: cfg.ProjectsRoot, ControlRoot: controlRoot, Name: name,
+	})
+	if err != nil {
+		return nil, changework.Catalog{}, err
+	}
+	if snapshot.Manifest.State != inspectwork.MetadataValid || snapshot.Manifest.Value == nil {
+		return nil, changework.Catalog{}, fmt.Errorf("Work manifest is not valid; run Repair Work")
+	}
+	if snapshot.Operation.ResumeSuggested {
+		return nil, changework.Catalog{}, fmt.Errorf("New Work is incomplete; Resume it before changing repositories")
+	}
+	if snapshot.ChangeOperation.ResumeSuggested {
+		return nil, changework.Catalog{}, fmt.Errorf("repository change is incomplete; Resume it first")
+	}
+	manifest := cloneConfiguredManifest(*snapshot.Manifest.Value)
+	adoptingID := ""
+	if kind == changework.KindAdopt && len(selectedIDs) == 1 {
+		adoptingID, err = resolveWorkRepositoryID(manifest, selectedIDs[0])
+		if err != nil {
+			return nil, changework.Catalog{}, err
+		}
+		selectedIDs = []string{adoptingID}
+	}
+	for _, problem := range snapshot.Problems {
+		if adoptingID != "" && problem.RepositoryID == adoptingID && branchAdoptionProblem(problem.Code) {
+			continue
+		}
+		return nil, changework.Catalog{}, fmt.Errorf("Work needs attention before changing repositories: %s", problem.Message)
+	}
+	if err := requireTerminalWorkOperations(controlRoot, manifest.WorkID.String()); err != nil {
+		return nil, changework.Catalog{}, err
+	}
+	pool := make([]string, 0, len(manifest.Repositories)+len(selectedIDs))
+	for _, repository := range manifest.Repositories {
+		pool = append(pool, repository.ID)
+	}
+	pool = append(pool, selectedIDs...)
+	catalog := changework.Catalog{
+		WorkRoot: snapshot.WorkRoot, ControlRoot: controlRoot, Manifest: manifest,
+		Repositories: make(map[string]changework.Repository, len(selectedIDs)),
+	}
+	for _, id := range selectedIDs {
+		if kind == changework.KindAdopt {
+			continue // Adoption uses the source identity already owned by the Work.
+		}
+		path, ok := cfg.RepoPath(id)
+		if !ok {
+			return nil, changework.Catalog{}, fmt.Errorf("repository %q is not configured", id)
+		}
+		catalog.Repositories[id] = changework.Repository{
+			ID: id, SourcePath: path, Folder: cfg.FolderName(id, pool),
+			Remote: cfg.RepoRemote(id), BasePreference: cfg.RepoBranch(id),
+		}
+	}
+	return cfg, catalog, nil
+}
+
+func cloneConfiguredManifest(manifest work.Manifest) work.Manifest {
+	manifest.Repositories = append([]work.RepositoryIntent(nil), manifest.Repositories...)
+	manifest.InactiveRepositories = append([]work.InactiveRepositoryIntent(nil), manifest.InactiveRepositories...)
+	manifest.Harness.RepositoryIDs = append([]string(nil), manifest.Harness.RepositoryIDs...)
+	manifest.Harness.UsePaths = append([]string(nil), manifest.Harness.UsePaths...)
+	return manifest
 }
 
 func createConfiguredNewWork(ctx context.Context, plan newwork.Plan) (newwork.ExecutionResult, error) {
@@ -479,11 +668,21 @@ func runConfig(args []string) error {
 
 func runRepos(args []string) error {
 	if len(args) == 0 {
-		return runConfigShow()
+		return runReposList(nil)
 	}
 	switch args[0] {
 	case "list":
-		return runConfigShow()
+		return runReposList(args[1:])
+	case "status":
+		return runReposStatus(args[1:])
+	case "fetch":
+		return runReposFetch(args[1:])
+	case "update":
+		return runReposUpdate(args[1:])
+	case "open":
+		return runReposOpen(args[1:])
+	case "group":
+		return runReposGroup(args[1:])
 	case "scan":
 		return runReposScan()
 	case "set":
@@ -515,10 +714,10 @@ usage:
   goworktree                       Works dashboard, New Work, and scoped actions
   goworktree init
   goworktree start <name> --repos id,id [--offline] [--open] create or resume typed New Work
-  goworktree add <project> --repos id,id add repos to an existing project
-  goworktree drop <project> --repos id,id [-D] [--yes] remove repos from a project
+  goworktree add <work> --repos id,id [--offline] add repositories to an existing Work
+  goworktree drop <work> --repos id,id [-D] --yes remove clean worktrees from a Work
   goworktree sync <work>           plan from fetched OIDs and rebase Work branches
-  goworktree branch <project> <repo> adopt a worktree's current branch
+  goworktree branch <work> <repo>  record a worktree's current local branch with resumable checkpoints
   goworktree list
   goworktree remove <work> --confirm <exact-work-name> delete Work worktrees and local branches
   goworktree archives <list|show|delete>             inspect or delete removed-Work metadata archives
@@ -528,19 +727,28 @@ usage:
   goworktree doctor
   goworktree repair <work>         apply deterministic repairs from inspected facts
   goworktree config [show|edit|set <key> <value>]
-  goworktree repos [list|scan|set <id> --path PATH --branch BRANCH]
+  goworktree repos list [--group GROUP]
+  goworktree repos status [--repos id,id|--group GROUP|--all]
+  goworktree repos fetch (--repos id,id|--group GROUP|--all)
+  goworktree repos update (--repos id,id|--group GROUP|--all)
+  goworktree repos open <id> [--program ID]
+  goworktree repos group <list|add|remove|rename|delete>
+  goworktree repos scan
+  goworktree repos set <id> [--path PATH] [--branch BRANCH]
   goworktree programs <list|add|update|delete|default|search>
 
 notes:
   dashboard inspection does not mutate or fetch until an explicit action is selected
-  use n for New Work and : for the scoped action palette
-  use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate the dashboard
+  use Tab to switch Works/Repositories, n for New Work, and : for scoped actions
+  use j/k, h/l, g/G, ctrl+u/d, /, r, and q to navigate; ? opens contextual help
   explicit commands never open pickers; pass required arguments and --repos
   start resumes typed New Work from its external operation record
   Repair Work refuses ambiguous identity, branch, OID, and corrupt-manifest states
-  Remove Work always deletes its confirmed LOCAL branches; remotes are untouched
-  drop -D deletes only LOCAL branches; remotes are untouched
-  add/drop auto-migrate legacy projects (write .goworktree.json from existing worktrees)
+  Remove Work includes retained branches from drop in its confirmed LOCAL targets
+  add is online by default; --offline resolves only locally known base refs
+  drop keeps Work branches by default; -D deletes exact LOCAL branches only
+  add/drop retries must match the original repository set, mode, and deletion flags
+  interrupted add/drop/branch operations Resume from the external Change Work record
 
 `, version)
 }

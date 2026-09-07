@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
@@ -17,20 +18,24 @@ import (
 )
 
 const (
-	actionNewWork         = "new-work"
-	actionRefresh         = "refresh"
-	actionResume          = "resume-new-work"
-	actionSync            = "sync-work"
-	actionRepair          = "repair-work"
-	actionRemove          = "remove-work"
-	actionConflictProgram = "conflict-program"
-	openPrefix            = "open:"
-	conflictProgramPrefix = "conflict-program:"
+	actionNewWork            = "new-work"
+	actionRefresh            = "refresh"
+	actionResume             = "resume-new-work"
+	actionResumeChange       = "resume-change-work"
+	actionAddRepositories    = "add-repositories"
+	actionRemoveRepositories = "remove-repositories"
+	actionSync               = "sync-work"
+	actionRepair             = "repair-work"
+	actionRemove             = "remove-work"
+	actionConflictProgram    = "conflict-program"
+	openPrefix               = "open:"
+	conflictProgramPrefix    = "conflict-program:"
 )
 
 func (m workAppModel) isListScreen() bool {
 	switch m.screen {
-	case workHome, workOverview, workActions, workConflictProgram, workNewRepositories:
+	case workHome, workOverview, workActions, workConflictProgram, workNewRepositories, workNewRepositoryFilter,
+		workChangeRepositories, workSourceHome, workSourceFilter, workSourceActions, workSourceRemoveGroup:
 		return true
 	default:
 		return false
@@ -39,7 +44,7 @@ func (m workAppModel) isListScreen() bool {
 
 func (m workAppModel) canOpenActions() bool {
 	switch m.screen {
-	case workHome, workOverview, workRepository, workProblem:
+	case workHome, workOverview, workRepository, workProblem, workSourceHome, workSourceRepository:
 		return true
 	default:
 		return false
@@ -48,7 +53,7 @@ func (m workAppModel) canOpenActions() bool {
 
 func (m workAppModel) canRefresh() bool {
 	switch m.screen {
-	case workHome, workOverview, workRepository, workProblem, workLoadError:
+	case workHome, workOverview, workRepository, workProblem, workLoadError, workSourceHome, workSourceRepository:
 		return true
 	default:
 		return false
@@ -70,12 +75,28 @@ func (m *workAppModel) openActionPalette() {
 		}
 		items = append(items, listItem{actionNewWork, "New Work", "Create branches, worktrees, and go.work", reason})
 	} else {
+		entry := m.currentWork()
 		if entry := m.currentWork(); entry != nil && entry.Snapshot != nil && entry.Snapshot.Operation.ResumeSuggested {
 			reason := ""
 			if m.actions.ResumeNewWork == nil {
 				reason = "typed Resume New Work workflow is unavailable"
 			}
 			items = append(items, listItem{actionResume, "Resume New Work", "Continue the recorded incomplete operation", reason})
+		}
+		changeBlocked := ""
+		conflictingChangeBlocked := ""
+		if entry == nil || entry.Snapshot == nil || entry.Snapshot.Manifest.State != "valid" {
+			changeBlocked = "Work manifest is not valid"
+		} else if entry.Snapshot.ChangeOperation.ResumeSuggested {
+			reason := ""
+			if m.actions.ResumeRepositoryChange == nil {
+				reason = "typed Resume repository change workflow is unavailable"
+			}
+			items = append(items, listItem{actionResumeChange, "Resume repository change", "Continue the recorded repository-set mutation", reason})
+			changeBlocked = "resume the incomplete repository change first"
+			conflictingChangeBlocked = changeBlocked
+		} else if len(entry.Snapshot.Problems) != 0 {
+			changeBlocked = "resolve Work problems first"
 		}
 		for _, program := range m.actions.Programs {
 			title := "Open in " + program.Name
@@ -91,22 +112,57 @@ func (m *workAppModel) openActionPalette() {
 		if len(m.actions.Programs) == 0 {
 			items = append(items, listItem{openPrefix, "Open Work", "No enabled programs", "configure an enabled Open with program"})
 		}
+		addBlocked := changeBlocked
+		if addBlocked == "" && (m.actions.PlanAddRepositories == nil || m.actions.RunRepositoryChange == nil) {
+			addBlocked = "typed Add repositories workflow is unavailable"
+		}
+		if addBlocked == "" && entry != nil && entry.Snapshot != nil {
+			active := make(map[string]struct{}, len(entry.Snapshot.Repositories))
+			for _, repository := range entry.Snapshot.Repositories {
+				active[repository.ID] = struct{}{}
+			}
+			eligible := false
+			for _, repository := range m.actions.Repositories {
+				if _, exists := active[repository.ID]; !exists {
+					eligible = true
+					break
+				}
+			}
+			if !eligible {
+				addBlocked = "all configured repositories are already active"
+			}
+		}
+		removeRepositoriesBlocked := changeBlocked
+		if removeRepositoriesBlocked == "" && (m.actions.PlanRemoveRepositories == nil || m.actions.RunRepositoryChange == nil) {
+			removeRepositoriesBlocked = "typed Remove repositories workflow is unavailable"
+		}
+		if removeRepositoriesBlocked == "" && entry != nil && entry.Snapshot != nil && len(entry.Snapshot.Repositories) <= 1 {
+			removeRepositoriesBlocked = "a Work must retain at least one repository"
+		}
 		syncBlocked := ""
 		if m.actions.PlanSyncWork == nil || m.actions.RunSyncWork == nil {
 			syncBlocked = "typed Sync Work workflow is unavailable"
+		} else if conflictingChangeBlocked != "" {
+			syncBlocked = conflictingChangeBlocked
 		}
 		removeBlocked := ""
 		if m.actions.PlanRemoveWork == nil || m.actions.RunRemoveWork == nil {
 			removeBlocked = "typed Remove Work workflow is unavailable"
+		} else if conflictingChangeBlocked != "" {
+			removeBlocked = conflictingChangeBlocked
 		}
 		repairBlocked := ""
 		if m.actions.PlanRepairWork == nil || m.actions.RunRepairWork == nil {
 			repairBlocked = "typed Repair Work workflow is unavailable"
+		} else if conflictingChangeBlocked != "" {
+			repairBlocked = conflictingChangeBlocked
 		}
 		items = append(items,
 			listItem{actionSync, "Sync Work", "Fetch and rebase every Work repository", syncBlocked},
 			listItem{actionRepair, "Repair Work", "Reconcile manifest, Git, and filesystem state", repairBlocked},
 			listItem{actionRemove, "Remove Work", "Show a destructive plan and remove the Work", removeBlocked},
+			listItem{actionAddRepositories, "Add repositories", "Extend this Work with configured repositories", addBlocked},
+			listItem{actionRemoveRepositories, "Remove repositories", "Shrink this Work without touching remotes", removeRepositoriesBlocked},
 		)
 	}
 	resolver := "follows default"
@@ -183,6 +239,14 @@ func (m workAppModel) activateAction() (tea.Model, tea.Cmd) {
 		return m.refreshFromAction()
 	case item.id == actionResume:
 		return m.startResumeNewWork()
+	case item.id == actionResumeChange:
+		return m.startResumeRepositoryChange()
+	case item.id == actionAddRepositories:
+		m.beginRepositoryChange(changework.KindAdd)
+		return m, nil
+	case item.id == actionRemoveRepositories:
+		m.beginRepositoryChange(changework.KindRemove)
+		return m, nil
 	case item.id == actionSync:
 		return m.startSyncWorkPlanning()
 	case item.id == actionRemove:
@@ -261,14 +325,7 @@ func (m workAppModel) startSetConflictProgram(programID string) (tea.Model, tea.
 	if m.actions.SetConflictProgram == nil {
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation := m.operationID
-	m.operationKind = "set-conflict-program"
-	m.operationTitle = "Saving conflict resolver"
-	m.operationMessage = "Updating local goworktree configuration…"
-	m.screen = workOperation
+	operationCtx, generation := m.beginOperation("set-conflict-program", "Saving conflict resolver", "Updating local goworktree configuration…")
 	return m, func() tea.Msg {
 		err := m.actions.SetConflictProgram(operationCtx, programID)
 		return conflictProgramSavedMsg{generation: generation, programID: programID, err: err}
@@ -308,10 +365,12 @@ func (m workAppModel) refreshFromAction() (tea.Model, tea.Cmd) {
 
 func (m *workAppModel) beginNewWork() {
 	m.input.SetValue("")
+	m.input.Placeholder = "EVOVPC-1234-short-description"
 	m.input.Focus()
 	m.actionNotice = ""
 	m.selectedNewRepos = make(map[string]bool)
 	m.newWorkMode = newwork.ModeOnline
+	m.newWorkFilter = sourceFilterAll
 	m.newWorkPlan = newwork.Plan{}
 	m.screen = workNewName
 }
@@ -340,6 +399,9 @@ func (m workAppModel) updateNewWorkName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *workAppModel) setNewWorkRepositories(selected int) {
 	items := make([]list.Item, 0, len(m.actions.Repositories))
 	for index, repository := range m.actions.Repositories {
+		if !sourceMatchesFilter(repository.Groups, m.newWorkFilter) {
+			continue
+		}
 		mark := "○"
 		if m.selectedNewRepos[repository.ID] {
 			mark = "✓"
@@ -385,6 +447,9 @@ func (m workAppModel) updateNewWorkRepositories(msg tea.KeyMsg) (tea.Model, tea.
 		selected := m.list.Index()
 		m.setNewWorkRepositories(selected)
 		return m, nil
+	case "f":
+		m.openNewWorkRepositoryFilter()
+		return m, nil
 	case "enter", "l":
 		if len(m.selectedRepositoryIDs()) == 0 {
 			m.actionNotice = "Select at least one repository with Space"
@@ -413,18 +478,11 @@ func (m workAppModel) startNewWorkPlanning() (tea.Model, tea.Cmd) {
 		m.setActionResult("New Work unavailable", "Typed New Work planning is unavailable.", workNewRepositories, false)
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation := m.operationID
 	request := newwork.Request{
 		Name: m.input.Value(), RepositoryIDs: m.selectedRepositoryIDs(),
 		BaseOverrides: map[string]string{}, Mode: m.newWorkMode,
 	}
-	m.operationKind = "plan-new-work"
-	m.operationTitle = "Planning New Work"
-	m.operationMessage = planningMessage(m.newWorkMode, len(request.RepositoryIDs))
-	m.screen = workOperation
+	operationCtx, generation := m.beginOperation("plan-new-work", "Planning New Work", planningMessage(m.newWorkMode, len(request.RepositoryIDs)))
 	return m, func() tea.Msg {
 		plan, err := m.actions.PlanNewWork(operationCtx, request)
 		return newWorkPlannedMsg{generation: generation, plan: plan, err: err}
@@ -474,15 +532,8 @@ func (m workAppModel) startCreateNewWork() (tea.Model, tea.Cmd) {
 		m.setActionResult("New Work unavailable", "Typed New Work execution is unavailable.", workNewPlan, false)
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation := m.operationID
 	plan := m.newWorkPlan
-	m.operationKind = "create-new-work"
-	m.operationTitle = "Creating Work · " + plan.WorkName.String()
-	m.operationMessage = fmt.Sprintf("Creating and verifying %d repository worktrees. Partial verified state is preserved if interrupted…", len(plan.Repositories))
-	m.screen = workOperation
+	operationCtx, generation := m.beginOperation("create-new-work", "Creating Work · "+plan.WorkName.String(), fmt.Sprintf("Creating and verifying %d repository worktrees. Partial verified state is preserved if interrupted…", len(plan.Repositories)))
 	return m, func() tea.Msg {
 		result, err := m.actions.CreateNewWork(operationCtx, plan)
 		return newWorkCreatedMsg{generation: generation, result: result, err: err}
@@ -499,15 +550,8 @@ func (m workAppModel) startResumeNewWork() (tea.Model, tea.Cmd) {
 		m.actionNotice = "Unavailable: this Work has no resumable New Work operation"
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation := m.operationID
 	path := entry.Snapshot.Operation.Path
-	m.operationKind = "resume-new-work"
-	m.operationTitle = "Resuming New Work · " + entry.Name
-	m.operationMessage = "Reconciling recorded steps and continuing only verified pending work…"
-	m.screen = workOperation
+	operationCtx, generation := m.beginOperation("resume-new-work", "Resuming New Work · "+entry.Name, "Reconciling recorded steps and continuing only verified pending work…")
 	return m, func() tea.Msg {
 		result, err := m.actions.ResumeNewWork(operationCtx, path)
 		return newWorkCreatedMsg{generation: generation, result: result, err: err}
@@ -555,14 +599,7 @@ func (m workAppModel) startOpenWork(programID string) (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation := m.operationID
-	m.operationKind = "open-work"
-	m.operationTitle = "Opening Work · " + programName
-	m.operationMessage = entry.RootPath
-	m.screen = workOperation
+	operationCtx, generation := m.beginOperation("open-work", "Opening Work · "+programName, entry.RootPath)
 	request := WorkOpenRequest{WorkName: entry.Name, WorkRoot: entry.RootPath, Program: programID}
 	return m, func() tea.Msg {
 		err := m.actions.OpenWork(operationCtx, request)
@@ -611,6 +648,9 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", "h", "esc":
 		if m.resultRefresh {
+			if m.resultReturn == workSourceHome || m.resultReturn == workSourceRepository {
+				return m.beginSourceRefresh(m.resultReturn)
+			}
 			m.restoreScreen = m.resultReturn
 			m.screen = workLoading
 			m.generation++
@@ -618,6 +658,10 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.resultReturn == workNewRepositories {
 			m.setNewWorkRepositories(0)
+		} else if m.resultReturn == workChangeRepositories {
+			m.setRepositoryChangeItems(0)
+		} else if m.resultReturn == workChangePlan {
+			m.screen = workChangePlan
 		} else if m.resultReturn == workNewPlan {
 			m.screen = workNewPlan
 		} else if m.resultReturn == workSyncPlan {
@@ -626,6 +670,10 @@ func (m workAppModel) updateActionResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = workRemovePlan
 		} else if m.resultReturn == workRepairPlan {
 			m.screen = workRepairPlan
+		} else if m.resultReturn == workSourceHome {
+			m.setSourceHome(m.selectedSourceID)
+		} else if m.resultReturn == workSourceRepository && m.openSourceRepository(m.selectedSourceID) {
+			// openSourceRepository restores source repository detail.
 		} else if m.resultReturn == workOverview && m.setWork(m.selectedWorkName, m.selectedRepoID) {
 			// setWork restores the Work overview.
 		} else {
@@ -646,14 +694,8 @@ func (m workAppModel) startSyncWorkPlanning() (tea.Model, tea.Cmd) {
 		m.actionNotice = "Unavailable: typed Sync Work planning is unavailable"
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, name := m.operationID, m.selectedWorkName
-	m.operationKind = "plan-sync-work"
-	m.operationTitle = "Planning Sync Work · " + name
-	m.operationMessage = "Fetching configured remotes and resolving exact base commits. No local branch is changed during planning…"
-	m.screen = workOperation
+	name := m.selectedWorkName
+	operationCtx, generation := m.beginOperation("plan-sync-work", "Planning Sync Work · "+name, "Fetching configured remotes and resolving exact base commits. No local branch is changed during planning…")
 	return m, func() tea.Msg {
 		plan, err := m.actions.PlanSyncWork(operationCtx, name)
 		return syncWorkPlannedMsg{generation: generation, plan: plan, err: err}
@@ -696,14 +738,8 @@ func (m workAppModel) startRunSyncWork() (tea.Model, tea.Cmd) {
 		m.setActionResult("Sync Work unavailable", "Typed Sync Work execution is unavailable.", workSyncPlan, false)
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, plan := m.operationID, m.syncWorkPlan
-	m.operationKind = "run-sync-work"
-	m.operationTitle = "Syncing Work · " + plan.WorkName
-	m.operationMessage = fmt.Sprintf("Revalidating and synchronizing %d repositories. Independent failures do not stop the batch…", len(plan.Repos))
-	m.screen = workOperation
+	plan := m.syncWorkPlan
+	operationCtx, generation := m.beginOperation("run-sync-work", "Syncing Work · "+plan.WorkName, fmt.Sprintf("Revalidating and synchronizing %d repositories. Independent failures do not stop the batch…", len(plan.Repos)))
 	return m, func() tea.Msg {
 		result, err := m.actions.RunSyncWork(operationCtx, plan)
 		return syncWorkCompletedMsg{generation: generation, result: result, err: err}
@@ -852,14 +888,8 @@ func (m workAppModel) startRemoveWorkPlanning() (tea.Model, tea.Cmd) {
 		m.actionNotice = "Unavailable: typed Remove Work planning is unavailable"
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, name := m.operationID, m.selectedWorkName
-	m.operationKind = "plan-remove-work"
-	m.operationTitle = "Planning Remove Work · " + name
-	m.operationMessage = "Inspecting exact local worktree, branch, dirty-file, and Work-root deletion targets. No network operation is performed…"
-	m.screen = workOperation
+	name := m.selectedWorkName
+	operationCtx, generation := m.beginOperation("plan-remove-work", "Planning Remove Work · "+name, "Inspecting exact local worktree, branch, dirty-file, and Work-root deletion targets. No network operation is performed…")
 	return m, func() tea.Msg {
 		plan, err := m.actions.PlanRemoveWork(operationCtx, name)
 		return removeWorkPlannedMsg{generation: generation, plan: plan, err: err}
@@ -926,14 +956,8 @@ func (m workAppModel) startRunRemoveWork(confirmation string) (tea.Model, tea.Cm
 		m.setActionResult("Remove Work unavailable", "Typed Remove Work execution is unavailable.", workRemovePlan, false)
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, plan := m.operationID, m.removeWorkPlan
-	m.operationKind = "run-remove-work"
-	m.operationTitle = "Removing Work · " + plan.WorkName
-	m.operationMessage = "Recording removal intent externally, then deleting exact worktrees, local refs, and the confirmed Work root…"
-	m.screen = workOperation
+	plan := m.removeWorkPlan
+	operationCtx, generation := m.beginOperation("run-remove-work", "Removing Work · "+plan.WorkName, "Recording removal intent externally, then deleting exact worktrees, local refs, and the confirmed Work root…")
 	return m, func() tea.Msg {
 		result, err := m.actions.RunRemoveWork(operationCtx, plan, confirmation)
 		return removeWorkCompletedMsg{generation: generation, result: result, err: err}
@@ -964,6 +988,13 @@ func formatRemoveWorkPlan(plan removework.Plan) string {
 		factLine("Recovery record", plan.OperationRecord), "", "This operation is irreversible at product level.",
 	}
 	for _, repository := range plan.Repositories {
+		if repository.BranchOnly {
+			lines = append(lines, "", repository.ID,
+				"  retained branch only; no worktree will be deleted",
+				"  delete local ref: "+repository.BranchRef+" @ "+syncwork.ShortOID(repository.BranchOID),
+			)
+			continue
+		}
 		lines = append(lines, "", repository.ID,
 			"  worktree: "+repository.Destination,
 			"  delete local ref: "+repository.BranchRef+" @ "+syncwork.ShortOID(repository.BranchOID),
@@ -997,14 +1028,8 @@ func (m workAppModel) startRepairWorkPlanning() (tea.Model, tea.Cmd) {
 		m.actionNotice = "Unavailable: typed Repair Work planning is unavailable"
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, name := m.operationID, m.selectedWorkName
-	m.operationKind = "plan-repair-work"
-	m.operationTitle = "Planning Repair Work · " + name
-	m.operationMessage = "Classifying observed problems. Ambiguous branch, identity, or metadata conflicts will not be changed automatically…"
-	m.screen = workOperation
+	name := m.selectedWorkName
+	operationCtx, generation := m.beginOperation("plan-repair-work", "Planning Repair Work · "+name, "Classifying observed problems. Ambiguous branch, identity, or metadata conflicts will not be changed automatically…")
 	return m, func() tea.Msg {
 		plan, err := m.actions.PlanRepairWork(operationCtx, name)
 		return repairWorkPlannedMsg{generation: generation, plan: plan, err: err}
@@ -1047,14 +1072,8 @@ func (m workAppModel) startRunRepairWork() (tea.Model, tea.Cmd) {
 		m.setActionResult("Repair Work unavailable", "Typed Repair Work execution is unavailable.", workRepairPlan, false)
 		return m, nil
 	}
-	operationCtx, cancel := context.WithCancel(m.ctx)
-	m.operationCancel = cancel
-	m.operationID++
-	generation, plan := m.operationID, m.repairWorkPlan
-	m.operationKind = "run-repair-work"
-	m.operationTitle = "Repairing Work · " + plan.WorkName
-	m.operationMessage = fmt.Sprintf("Applying and verifying %d deterministic repair actions…", len(plan.Actions))
-	m.screen = workOperation
+	plan := m.repairWorkPlan
+	operationCtx, generation := m.beginOperation("run-repair-work", "Repairing Work · "+plan.WorkName, fmt.Sprintf("Applying and verifying %d deterministic repair actions…", len(plan.Actions)))
 	return m, func() tea.Msg {
 		result, err := m.actions.RunRepairWork(operationCtx, plan)
 		return repairWorkCompletedMsg{generation: generation, result: result, err: err}

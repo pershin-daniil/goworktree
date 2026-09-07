@@ -47,6 +47,7 @@ type Plan struct {
 	OpenProgram         string           `json:"open_program,omitempty"`
 	Repositories        []RepositoryPlan `json:"repositories"`
 	HarnessUsePaths     []string         `json:"harness_use_paths,omitempty"`
+	HarnessExplicit     bool             `json:"harness_explicit,omitempty"`
 	NoRemoteMutation    bool             `json:"no_remote_mutation"`
 }
 

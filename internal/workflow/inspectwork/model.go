@@ -47,6 +47,7 @@ type Action string
 const (
 	ActionNone                Action = "none"
 	ActionResumeNewWork       Action = "resume-new-work"
+	ActionResumeChangeWork    Action = "resume-change-work"
 	ActionRepairWork          Action = "repair-work"
 	ActionResolveGitOperation Action = "resolve-git-operation"
 )
@@ -63,6 +64,10 @@ const (
 	ProblemOperationInvalid         ProblemCode = "operation-record-invalid"
 	ProblemOperationMismatch        ProblemCode = "operation-record-mismatch"
 	ProblemNewWorkIncomplete        ProblemCode = "new-work-incomplete"
+	ProblemChangeOperationMissing   ProblemCode = "change-operation-record-missing"
+	ProblemChangeOperationInvalid   ProblemCode = "change-operation-record-invalid"
+	ProblemChangeOperationMismatch  ProblemCode = "change-operation-record-mismatch"
+	ProblemChangeWorkIncomplete     ProblemCode = "change-work-incomplete"
 	ProblemSourceUnreadable         ProblemCode = "source-unreadable"
 	ProblemSourceIdentityMismatch   ProblemCode = "source-identity-mismatch"
 	ProblemBranchInspectionFailed   ProblemCode = "branch-inspection-failed"
@@ -94,18 +99,29 @@ type Problem struct {
 }
 
 type Snapshot struct {
-	InspectedAt  time.Time
-	WorkName     work.Name
-	WorkID       work.Identity
-	WorksRoot    string
-	WorkRoot     string
-	WorkRootKind PathKind
-	Manifest     ManifestSnapshot
-	Operation    OperationSnapshot
-	IntentSource IntentSource
-	Repositories []RepositorySnapshot
-	Harness      HarnessSnapshot
-	Problems     []Problem
+	InspectedAt     time.Time
+	WorkName        work.Name
+	WorkID          work.Identity
+	WorksRoot       string
+	WorkRoot        string
+	WorkRootKind    PathKind
+	Manifest        ManifestSnapshot
+	Operation       OperationSnapshot
+	ChangeOperation ChangeOperationSnapshot
+	IntentSource    IntentSource
+	Repositories    []RepositorySnapshot
+	Harness         HarnessSnapshot
+	Problems        []Problem
+}
+
+type ChangeOperationSnapshot struct {
+	Path            string
+	State           MetadataState
+	OperationID     string
+	Kind            string
+	Phase           string
+	LastProblem     string
+	ResumeSuggested bool
 }
 
 type ManifestSnapshot struct {

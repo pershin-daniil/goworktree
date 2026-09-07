@@ -255,9 +255,120 @@ func DeleteLocalBranchAtOIDContext(ctx context.Context, repo, fullRef, expectedO
 	return err
 }
 
+// UpdateLocalBranchAtOIDContext fast-forwards one non-checked-out local branch
+// from an exact old OID to an exact descendant OID. It never addresses remote
+// refs and never forces a non-fast-forward update.
+func UpdateLocalBranchAtOIDContext(ctx context.Context, repo, fullRef, oldOID, newOID string) error {
+	if _, err := localBranchName(fullRef); err != nil {
+		return err
+	}
+	if strings.TrimSpace(oldOID) == "" || strings.TrimSpace(newOID) == "" {
+		return fmt.Errorf("old and new branch OIDs are required")
+	}
+	observed, exists, err := LocalBranchOIDContext(ctx, repo, fullRef)
+	if err != nil {
+		return err
+	}
+	if !exists || observed != oldOID {
+		return fmt.Errorf("local branch %s changed: expected %s, observed %s", fullRef, oldOID, observed)
+	}
+	worktrees, err := ListWorktreesContext(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list worktrees: %w", err)
+	}
+	for _, worktree := range worktrees {
+		if worktree.Branch == fullRef {
+			return fmt.Errorf("local branch %s is checked out at %s", fullRef, worktree.Path)
+		}
+	}
+	ancestor, err := IsAncestorContext(ctx, repo, oldOID, newOID)
+	if err != nil {
+		return err
+	}
+	if !ancestor {
+		return fmt.Errorf("refuse non-fast-forward update of %s", fullRef)
+	}
+	if _, err := runContext(ctx, repo, "update-ref", fullRef, newOID, oldOID); err != nil {
+		return err
+	}
+	observed, exists, err = LocalBranchOIDContext(ctx, repo, fullRef)
+	if err != nil {
+		return fmt.Errorf("verify local branch %s: %w", fullRef, err)
+	}
+	if !exists || observed != newOID {
+		return fmt.Errorf("verify local branch %s: expected %s, observed %s", fullRef, newOID, observed)
+	}
+	return nil
+}
+
+// FastForwardCheckoutAtOIDContext advances the exact checked-out local branch
+// to a descendant commit without creating a merge commit or switching branches.
+func FastForwardCheckoutAtOIDContext(ctx context.Context, repo, fullRef, oldOID, newOID string) error {
+	if _, err := localBranchName(fullRef); err != nil {
+		return err
+	}
+	checkout, err := InspectCheckoutContext(ctx, repo)
+	if err != nil {
+		return err
+	}
+	if checkout.FullRef != fullRef || checkout.HeadOID != oldOID {
+		return fmt.Errorf("checkout changed: expected %s at %s, observed %s at %s", fullRef, oldOID, checkout.FullRef, checkout.HeadOID)
+	}
+	status, err := WorkingTreeStatusContext(ctx, repo)
+	if err != nil {
+		return err
+	}
+	if status.Dirty() {
+		return fmt.Errorf("working tree has local changes")
+	}
+	operations, err := ActiveOperationsContext(ctx, repo)
+	if err != nil {
+		return err
+	}
+	if len(operations) > 0 {
+		return fmt.Errorf("active Git operation: %s", operations[0])
+	}
+	ancestor, err := IsAncestorContext(ctx, repo, oldOID, newOID)
+	if err != nil {
+		return err
+	}
+	if !ancestor {
+		return fmt.Errorf("refuse non-fast-forward update of %s", fullRef)
+	}
+	if _, err := runContext(ctx, repo, "merge", "--ff-only", "--no-edit", newOID); err != nil {
+		return err
+	}
+	checkout, err = InspectCheckoutContext(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("verify checkout: %w", err)
+	}
+	if checkout.FullRef != fullRef || checkout.HeadOID != newOID {
+		return fmt.Errorf("verify checkout: expected %s at %s, observed %s at %s", fullRef, newOID, checkout.FullRef, checkout.HeadOID)
+	}
+	status, err = WorkingTreeStatusContext(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("verify working tree: %w", err)
+	}
+	if status.Dirty() {
+		return fmt.Errorf("working tree is not clean after fast-forward")
+	}
+	return nil
+}
+
 // RemoveWorktreeContext removes one exact registered worktree through its
 // source repository, so it also works when the linked checkout is broken.
 func RemoveWorktreeContext(ctx context.Context, source, destination string) error {
+	return removeWorktreeContext(ctx, source, destination, true)
+}
+
+// RemoveCleanWorktreeContext removes a registered worktree without --force.
+// Git therefore remains the final guard against a dirty-worktree race after a
+// workflow's explicit clean-state and fingerprint checks.
+func RemoveCleanWorktreeContext(ctx context.Context, source, destination string) error {
+	return removeWorktreeContext(ctx, source, destination, false)
+}
+
+func removeWorktreeContext(ctx context.Context, source, destination string, force bool) error {
 	canonicalSource, err := canonicalExistingPath(source)
 	if err != nil {
 		return fmt.Errorf("canonical source path: %w", err)
@@ -266,7 +377,12 @@ func RemoveWorktreeContext(ctx context.Context, source, destination string) erro
 	if err != nil {
 		return fmt.Errorf("absolute worktree path: %w", err)
 	}
-	_, removeErr := runContext(ctx, canonicalSource, "worktree", "remove", "--force", filepath.Clean(destination))
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, filepath.Clean(destination))
+	_, removeErr := runContext(ctx, canonicalSource, args...)
 	_, pruneErr := runContext(ctx, canonicalSource, "worktree", "prune")
 	return errors.Join(removeErr, pruneErr)
 }

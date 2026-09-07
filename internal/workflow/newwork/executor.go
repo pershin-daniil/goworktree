@@ -610,6 +610,12 @@ func verifyManifest(path string, expected work.Manifest) error {
 	if err := actual.Validate(); err != nil {
 		return fmt.Errorf("validate Work manifest: %w", err)
 	}
+	// Schema 1 and schema 2 revision-zero manifests describe the same immutable
+	// New Work intent. This keeps interrupted schema-1 operations resumable
+	// after the application starts creating schema-2 manifests.
+	if actual.SchemaVersion == work.LegacyManifestSchemaVersion && expected.Revision == 0 {
+		actual.SchemaVersion = work.ManifestSchemaVersion
+	}
 	actualJSON, actualErr := json.Marshal(actual)
 	expectedJSON, expectedErr := json.Marshal(expected)
 	if actualErr != nil || expectedErr != nil {

@@ -1,8 +1,12 @@
 package newwork
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -84,6 +88,63 @@ func TestExpectedGoWorkPreservesExplicitNestedModules(t *testing.T) {
 	}
 	if checkpoint.GoVersion != "1.26.5" || len(checkpoint.UsePaths) != 3 {
 		t.Fatalf("checkpoint = %+v", checkpoint)
+	}
+}
+
+func TestExpectedGoWorkQuotesSpecialUsePathsForGoParser(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not available")
+	}
+
+	root := t.TempDir()
+	paths := []string{"./simple", "./with space", "./модуль", "./with+plus"}
+	if runtime.GOOS != "windows" {
+		paths = append(paths, "./with\"quote", "./with\\backslash")
+	}
+	for index, usePath := range paths {
+		directory := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(usePath, "./")))
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "go.mod"), []byte(fmt.Sprintf("module example.test/module%d\n\ngo 1.23\n", index)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	content, _, err := expectedGoWork(Plan{WorkRoot: root, HarnessUsePaths: paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(content); !strings.Contains(got, "\t./simple\n") ||
+		!strings.Contains(got, "\t\"./with space\"\n") ||
+		!strings.Contains(got, "\t./модуль\n") ||
+		!strings.Contains(got, "\t./with+plus\n") {
+		t.Fatalf("unexpected go.work content:\n%s", content)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.work"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("go", "work", "edit", "-json")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go work edit -json: %v\n%s", err, out)
+	}
+	var parsed struct {
+		Use []struct {
+			DiskPath string
+		}
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("parse go work edit output: %v\n%s", err, out)
+	}
+	got := make([]string, 0, len(parsed.Use))
+	for _, use := range parsed.Use {
+		got = append(got, use.DiskPath)
+	}
+	if !slices.Equal(got, paths) {
+		t.Fatalf("parsed use paths = %#v, want %#v", got, paths)
 	}
 }
 

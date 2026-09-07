@@ -66,13 +66,13 @@ tasks:
       - ./{{.BINARY}} start {{.CLI_ARGS}}
 
   add:
-    desc: Add repositories to an existing project
+    desc: Add repositories to an existing Work (online by default; --offline supported)
     deps: [build]
     cmds:
       - ./{{.BINARY}} add {{.CLI_ARGS}}
 
   drop:
-    desc: Drop repositories from a project (-D deletes local branches)
+    desc: Remove clean Work repositories (--yes required; -D deletes exact local branches)
     deps: [build]
     cmds:
       - ./{{.BINARY}} drop {{.CLI_ARGS}}
@@ -84,7 +84,7 @@ tasks:
       - ./{{.BINARY}} sync {{.CLI_ARGS}}
 
   branch:
-    desc: Adopt a repository worktree's current branch
+    desc: Record a worktree's current local branch with resumable Change Work checkpoints
     deps: [build]
     cmds:
       - ./{{.BINARY}} branch {{.CLI_ARGS}}
@@ -96,7 +96,7 @@ tasks:
       - ./{{.BINARY}} list
 
   remove:
-    desc: Run typed Remove Work (--confirm must equal the exact Work name)
+    desc: Remove Work and retained local branches (--confirm must equal the exact Work name)
     deps: [build]
     cmds:
       - ./{{.BINARY}} remove {{.CLI_ARGS}}
@@ -142,6 +142,24 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY}} repos scan
+
+  repos:status:
+    desc: Inspect locally known source repository state (pass scope via CLI_ARGS)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repos status {{.CLI_ARGS}}
+
+  repos:fetch:
+    desc: Fetch source repository remotes (pass explicit scope via CLI_ARGS)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repos fetch {{.CLI_ARGS}}
+
+  repos:update:
+    desc: Safely fast-forward source default branches (pass explicit scope via CLI_ARGS)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} repos update {{.CLI_ARGS}}
 
   fmt:
     desc: Format Go code

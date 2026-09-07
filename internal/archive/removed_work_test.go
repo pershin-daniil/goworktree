@@ -48,6 +48,31 @@ func TestStorePublishListShowAndDelete(t *testing.T) {
 	}
 }
 
+func TestStoreArchivesOptionalChangeWorkRecord(t *testing.T) {
+	store := archive.Store{ControlRoot: t.TempDir(), Now: func() time.Time { return archiveTime }}
+	sources := t.TempDir()
+	newRecord := writeRecord(t, sources, "new.json", "new")
+	changeRecord := writeRecord(t, sources, "change.json", "change")
+	removeRecord := writeRecord(t, sources, "remove.json", "remove")
+	id, err := store.NewID("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.Publish(archive.PublishRequest{
+		ArchiveID: id, WorkName: "alpha", WorkID: "work-alpha", RemovalID: "remove-alpha", CreatedAt: archiveTime,
+		NewWorkRecord: newRecord, ChangeWorkRecord: changeRecord, RemoveWorkRecord: removeRecord,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(summary.Path, "change-work.json")); err != nil {
+		t.Fatalf("archived Change Work record: %v", err)
+	}
+	if len(summary.Manifest.Files) != 3 {
+		t.Fatalf("archive files = %+v", summary.Manifest.Files)
+	}
+}
+
 func TestStoreDeleteRequiresExactConfirmation(t *testing.T) {
 	store := archive.Store{ControlRoot: t.TempDir(), Now: func() time.Time { return archiveTime }}
 	summary := publishArchive(t, store, "alpha", "work-alpha", "remove-alpha", false)

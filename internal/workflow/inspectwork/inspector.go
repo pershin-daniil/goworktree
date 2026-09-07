@@ -1,6 +1,7 @@
 package inspectwork
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	"github.com/pershin-daniil/goworktree/internal/work"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
@@ -29,11 +31,16 @@ type OperationReader interface {
 	Load(string) (newwork.OperationRecord, error)
 }
 
+type ChangeOperationReader interface {
+	Load(string) (changework.OperationRecord, error)
+}
+
 type Inspector struct {
-	Git        Git
-	Operations OperationReader
-	Now        func() time.Time
-	Limiter    *RepositoryLimiter
+	Git              Git
+	Operations       OperationReader
+	ChangeOperations ChangeOperationReader
+	Now              func() time.Time
+	Limiter          *RepositoryLimiter
 }
 
 // RepositoryLimiter bounds read-only repository inspections shared by one or
@@ -84,8 +91,14 @@ func (SystemGit) ActiveOperations(ctx context.Context, path string) ([]gitops.Ac
 
 type SystemOperationReader struct{}
 
+type SystemChangeOperationReader struct{}
+
 func (SystemOperationReader) Load(path string) (newwork.OperationRecord, error) {
 	return (newwork.OperationStore{}).Load(path)
+}
+
+func (SystemChangeOperationReader) Load(path string) (changework.OperationRecord, error) {
+	return changework.LoadRecord(path)
 }
 
 func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, error) {
@@ -136,6 +149,10 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 			Path:  filepath.Join(controlRoot, "operations", "new-work", workID.String()+".json"),
 			State: MetadataAbsent,
 		},
+		ChangeOperation: ChangeOperationSnapshot{
+			Path:  filepath.Join(controlRoot, "operations", "change-work", workID.String()+".json"),
+			State: MetadataAbsent,
+		},
 		Harness: HarnessSnapshot{Path: filepath.Join(workRoot, "go.work")},
 	}
 
@@ -157,6 +174,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 	}
 
 	record, recordValid := i.inspectOperation(&snapshot)
+	changeRecord, changeRecordValid := i.inspectChangeOperation(&snapshot)
 	manifestValid := snapshot.Manifest.State == MetadataValid && snapshot.Manifest.Value != nil
 	linked := false
 	if manifestValid && recordValid {
@@ -170,6 +188,7 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 		}
 	}
 	classifyNewWorkRecovery(&snapshot, record, recordValid, manifestValid, linked)
+	classifyChangeWorkRecovery(&snapshot, changeRecord, changeRecordValid, manifestValid)
 
 	var intents []work.RepositoryIntent
 	switch {
@@ -194,7 +213,11 @@ func (i Inspector) Inspect(ctx context.Context, request Request) (Snapshot, erro
 		return snapshot, err
 	}
 
-	i.inspectHarness(&snapshot, record, recordValid && (linked || !manifestValid))
+	verifyNewWorkHarness := recordValid && (linked || !manifestValid)
+	if manifestValid && snapshot.Manifest.Value.Revision > 0 {
+		verifyNewWorkHarness = false
+	}
+	i.inspectHarness(&snapshot, record, verifyNewWorkHarness)
 	return snapshot, nil
 }
 
@@ -320,6 +343,65 @@ func (i Inspector) inspectOperation(snapshot *Snapshot) (newwork.OperationRecord
 		return record, false
 	}
 	return record, true
+}
+
+func (i Inspector) inspectChangeOperation(snapshot *Snapshot) (changework.OperationRecord, bool) {
+	if i.ChangeOperations == nil {
+		return changework.OperationRecord{}, false
+	}
+	record, err := i.ChangeOperations.Load(snapshot.ChangeOperation.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return changework.OperationRecord{}, false
+	}
+	if err != nil {
+		snapshot.ChangeOperation.State = MetadataInvalid
+		snapshot.addProblem(Problem{
+			Code: ProblemChangeOperationInvalid, Path: snapshot.ChangeOperation.Path,
+			Message: err.Error(), Next: ActionRepairWork,
+		})
+		return changework.OperationRecord{}, false
+	}
+	snapshot.ChangeOperation.State = MetadataValid
+	snapshot.ChangeOperation.OperationID = record.OperationID
+	snapshot.ChangeOperation.Kind = string(record.Kind)
+	snapshot.ChangeOperation.Phase = string(record.Phase)
+	snapshot.ChangeOperation.LastProblem = record.LastProblem
+	return record, true
+}
+
+func classifyChangeWorkRecovery(snapshot *Snapshot, record changework.OperationRecord, recordValid, manifestValid bool) {
+	if recordValid && (record.WorkID != snapshot.WorkID || record.Plan.WorkName != snapshot.WorkName ||
+		filepath.Clean(record.Plan.WorkRoot) != filepath.Clean(snapshot.WorkRoot)) {
+		snapshot.addProblem(Problem{
+			Code: ProblemChangeOperationMismatch, Path: snapshot.ChangeOperation.Path,
+			Message: "Change Work operation identity does not match its Work", Next: ActionRepairWork,
+		})
+		return
+	}
+	if recordValid && record.Phase != changework.PhaseCompleted {
+		snapshot.ChangeOperation.ResumeSuggested = true
+		snapshot.addProblem(Problem{
+			Code: ProblemChangeWorkIncomplete, Path: snapshot.ChangeOperation.Path,
+			Message: fmt.Sprintf("repository-set change is in phase %q", record.Phase), Next: ActionResumeChangeWork,
+		})
+		return
+	}
+	if !manifestValid || snapshot.Manifest.Value.Revision == 0 {
+		return
+	}
+	if !recordValid {
+		snapshot.addProblem(Problem{
+			Code: ProblemChangeOperationMissing, Path: snapshot.ChangeOperation.Path,
+			Message: "manifest references a repository change, but its operation record is missing", Next: ActionRepairWork,
+		})
+		return
+	}
+	if !changework.RecordMatchesManifest(record, *snapshot.Manifest.Value) {
+		snapshot.addProblem(Problem{
+			Code: ProblemChangeOperationMismatch, Path: snapshot.ChangeOperation.Path,
+			Message: "manifest and latest repository change disagree", Next: ActionRepairWork,
+		})
+	}
 }
 
 func classifyNewWorkRecovery(snapshot *Snapshot, record newwork.OperationRecord, recordValid, manifestValid, linked bool) {
@@ -554,14 +636,21 @@ func (i Inspector) inspectHarness(snapshot *Snapshot, record newwork.OperationRe
 	if snapshot.IntentSource == IntentLegacyManifest {
 		return
 	}
-	expectsHarness := len(record.Plan.HarnessUsePaths) > 0
-	if snapshot.Manifest.Value != nil && len(snapshot.Manifest.Value.Harness.UsePaths) > 0 {
-		expectsHarness = true
+	expectsHarness := false
+	rootModulesOnly := !record.Plan.HarnessExplicit && len(record.Plan.HarnessUsePaths) == 0
+	usePaths := record.Plan.HarnessUsePaths
+	if snapshot.Manifest.Value != nil {
+		rootModulesOnly = snapshot.Manifest.Value.Harness.RootModulesOnly
+		usePaths = snapshot.Manifest.Value.Harness.UsePaths
 	}
-	for _, repository := range snapshot.Repositories {
-		if repository.Intent.IncludeInGoWork {
-			expectsHarness = true
-			break
+	if !rootModulesOnly {
+		expectsHarness = len(usePaths) > 0
+	} else {
+		for _, repository := range snapshot.Repositories {
+			if repository.Intent.IncludeInGoWork {
+				expectsHarness = true
+				break
+			}
 		}
 	}
 	if verifyOperation && record.Harness.State == newwork.StepVerified {
@@ -574,6 +663,26 @@ func (i Inspector) inspectHarness(snapshot *Snapshot, record newwork.OperationRe
 		}
 		snapshot.Harness.VerifiedAgainstOperation = true
 		return
+	}
+	if manifest := snapshot.Manifest.Value; manifest != nil && manifest.Revision > 0 {
+		expected, expectedExists, err := changework.RenderManifestHarness(*manifest, snapshot.WorkRoot)
+		if err != nil {
+			snapshot.addProblem(Problem{
+				Code: ProblemHarnessMismatch, Path: snapshot.Harness.Path,
+				Message: err.Error(), Next: ActionRepairWork,
+			})
+			return
+		}
+		if expectedExists && snapshot.Harness.Kind == PathRegular {
+			actual, err := work.ReadRegularFile(snapshot.Harness.Path)
+			if err != nil || !bytes.Equal(actual, expected) {
+				snapshot.addProblem(Problem{
+					Code: ProblemHarnessMismatch, Path: snapshot.Harness.Path,
+					Message: "go.work content does not match the current Work manifest", Next: ActionRepairWork,
+				})
+				return
+			}
+		}
 	}
 	if snapshot.Operation.ResumeSuggested && snapshot.Harness.Kind == PathMissing {
 		return
@@ -679,19 +788,49 @@ func validateManifestScope(manifest work.Manifest, snapshot Snapshot) error {
 		if !filepath.IsAbs(repository.SourcePath) || !filepath.IsAbs(repository.GitCommonDir) || !filepath.IsAbs(repository.Destination) {
 			return fmt.Errorf("repository %q has non-absolute paths", repository.ID)
 		}
-		if repository.BranchRef != "refs/heads/"+manifest.Name.String() {
+		if !validManifestBranch(manifest, repository.BranchRef) {
 			return fmt.Errorf("repository %q branch does not match Work name", repository.ID)
 		}
 		if filepath.Dir(filepath.Clean(repository.Destination)) != filepath.Clean(snapshot.WorkRoot) {
 			return fmt.Errorf("repository %q destination is outside Work root", repository.ID)
 		}
 	}
+	previousID = ""
+	for _, inactive := range manifest.InactiveRepositories {
+		repository := inactive.Repository
+		if previousID != "" && repository.ID < previousID {
+			return fmt.Errorf("inactive manifest repositories are not in stable ID order")
+		}
+		previousID = repository.ID
+		if !filepath.IsAbs(repository.SourcePath) || !filepath.IsAbs(repository.GitCommonDir) || !filepath.IsAbs(repository.Destination) {
+			return fmt.Errorf("inactive repository %q has non-absolute paths", repository.ID)
+		}
+		if !validManifestBranch(manifest, repository.BranchRef) {
+			return fmt.Errorf("inactive repository %q branch does not match Work name", repository.ID)
+		}
+		if filepath.Dir(filepath.Clean(repository.Destination)) != filepath.Clean(snapshot.WorkRoot) {
+			return fmt.Errorf("inactive repository %q destination is outside Work root", repository.ID)
+		}
+	}
 	return nil
+}
+
+func validManifestBranch(manifest work.Manifest, ref string) bool {
+	if manifest.Revision == 0 {
+		return ref == "refs/heads/"+manifest.Name.String()
+	}
+	// Revised branch intent is linked to the exact completed Change Work record.
+	return strings.HasPrefix(ref, "refs/heads/") && ref != "refs/heads/"
 }
 
 func matchManifestAndOperation(manifest work.Manifest, record newwork.OperationRecord) error {
 	if manifest.WorkID != record.WorkID || manifest.NewWorkOperationID != record.OperationID || manifest.Name != record.Plan.WorkName {
 		return fmt.Errorf("manifest and operation record identities disagree")
+	}
+	// A completed Change Work operation owns repository and harness revisions.
+	// The immutable New Work record remains creation provenance only.
+	if manifest.Revision > 0 {
+		return nil
 	}
 	if len(manifest.Repositories) != len(record.Plan.Repositories) {
 		return fmt.Errorf("manifest and operation record repository counts disagree")
@@ -705,7 +844,7 @@ func matchManifestAndOperation(manifest work.Manifest, record newwork.OperationR
 			return fmt.Errorf("manifest and operation record disagree on repository %q", intended.ID)
 		}
 	}
-	rootModulesOnly := len(record.Plan.HarnessUsePaths) == 0
+	rootModulesOnly := !record.Plan.HarnessExplicit && len(record.Plan.HarnessUsePaths) == 0
 	if manifest.Harness.RootModulesOnly != rootModulesOnly || !slices.Equal(manifest.Harness.UsePaths, record.Plan.HarnessUsePaths) {
 		return fmt.Errorf("manifest and operation record disagree on harness use paths")
 	}

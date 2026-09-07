@@ -57,6 +57,81 @@ func TestPlannerRecordsExactFingerprints(t *testing.T) {
 	}
 }
 
+func TestPlannerIncludesRetainedInactiveBranchWithoutTreatingDestinationAsManaged(t *testing.T) {
+	snapshot, controlRoot, git := plannerSnapshot(t)
+	inactive := work.RepositoryIntent{
+		ID: "retained", SourcePath: filepath.Join(filepath.Dir(snapshot.WorkRoot), "retained-source"), GitCommonDir: "retained-common",
+		BranchRef: "refs/heads/work", Destination: filepath.Join(snapshot.WorkRoot, "retained"),
+	}
+	snapshot.Manifest.Value.InactiveRepositories = []work.InactiveRepositoryIntent{{
+		Repository: inactive, BranchRetained: true, BranchOID: "retained-head",
+	}}
+	git.identities = map[string]gitops.RepositoryIdentity{
+		inactive.SourcePath: {SourcePath: inactive.SourcePath, CommonDir: inactive.GitCommonDir},
+	}
+	git.branchOIDs = map[string]string{inactive.BranchRef: "retained-head"}
+	git.branchExistsByRef = map[string]bool{inactive.BranchRef: true}
+
+	plan, err := (Planner{Git: git}).Build(context.Background(), snapshot, controlRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repositories) != 2 || !plan.Repositories[1].BranchOnly || plan.Repositories[1].ID != "retained" ||
+		plan.Repositories[1].WorkingTreeFingerprint != "" || plan.Repositories[1].Destination != "" {
+		t.Fatalf("retained branch plan = %+v", plan.Repositories)
+	}
+}
+
+func TestPlannerAllowsAlreadyMissingRetainedBranch(t *testing.T) {
+	snapshot, controlRoot, git := plannerSnapshot(t)
+	intent := work.RepositoryIntent{ID: "retained", SourcePath: filepath.Join(filepath.Dir(snapshot.WorkRoot), "retained-source"), GitCommonDir: "retained-common", BranchRef: "refs/heads/work"}
+	snapshot.Manifest.Value.InactiveRepositories = []work.InactiveRepositoryIntent{{Repository: intent, BranchRetained: true, BranchOID: "retained-head"}}
+	git.identities = map[string]gitops.RepositoryIdentity{intent.SourcePath: {SourcePath: intent.SourcePath, CommonDir: intent.GitCommonDir}}
+
+	plan, err := (Planner{Git: git}).Build(context.Background(), snapshot, controlRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repositories) != 2 || !plan.Repositories[1].BranchOnly || plan.Repositories[1].BranchOID != "retained-head" {
+		t.Fatalf("retained missing-branch plan = %+v", plan.Repositories)
+	}
+}
+
+func TestPlannerRejectsMovedOrCheckedOutRetainedBranch(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*fakeGit, work.RepositoryIntent)
+		want  string
+	}{
+		{
+			name: "moved", want: "branch changed",
+			setup: func(git *fakeGit, intent work.RepositoryIntent) {
+				git.branchOIDs = map[string]string{intent.BranchRef: "moved"}
+				git.branchExistsByRef = map[string]bool{intent.BranchRef: true}
+			},
+		},
+		{
+			name: "checked out elsewhere", want: "checked out elsewhere",
+			setup: func(git *fakeGit, intent work.RepositoryIntent) {
+				git.branchOIDs = map[string]string{intent.BranchRef: "retained-head"}
+				git.branchExistsByRef = map[string]bool{intent.BranchRef: true}
+				git.registrations = map[string][]gitops.WorktreeRegistration{intent.SourcePath: {{Path: "/elsewhere", Branch: intent.BranchRef, HeadOID: "retained-head"}}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, controlRoot, git := plannerSnapshot(t)
+			intent := work.RepositoryIntent{ID: "retained", SourcePath: filepath.Join(filepath.Dir(snapshot.WorkRoot), "retained-source"), GitCommonDir: "retained-common", BranchRef: "refs/heads/work"}
+			snapshot.Manifest.Value.InactiveRepositories = []work.InactiveRepositoryIntent{{Repository: intent, BranchRetained: true, BranchOID: "retained-head"}}
+			git.identities = map[string]gitops.RepositoryIdentity{intent.SourcePath: {SourcePath: intent.SourcePath, CommonDir: intent.GitCommonDir}}
+			test.setup(git, intent)
+			if _, err := (Planner{Git: git}).Build(context.Background(), snapshot, controlRoot); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Build error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestExecutorRequiresExactConfirmationBeforeRecordingOrMutation(t *testing.T) {
 	plan, git := testPlan(t)
 	_, err := (Executor{Git: git, Locker: fakeLocker{}, Safety: fakeSafety{}}).Execute(context.Background(), plan, "wrong")
@@ -94,6 +169,28 @@ func TestExecutorRemovesExactWorktreeBranchAndRoot(t *testing.T) {
 	}
 }
 
+func TestExecutorArchivesAndCleansCompletedChangeWorkRecord(t *testing.T) {
+	plan, git := testPlan(t)
+	changeRecord := changeWorkRecord(plan)
+	if err := os.MkdirAll(filepath.Dir(changeRecord), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changeRecord, []byte("{\"change\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (Executor{Git: git, Locker: fakeLocker{}, Safety: fakeSafety{}}).Execute(context.Background(), plan, plan.WorkName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(changeRecord); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active Change Work record remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(result.ArchivePath, "change-work.json")); err != nil {
+		t.Fatalf("archived Change Work record: %v", err)
+	}
+}
+
 func TestExecutorRejectsDifferentWorkingTreeWithSameAggregateStatus(t *testing.T) {
 	plan, git := testPlan(t)
 	git.fingerprint = "same-counts-different-paths-and-content"
@@ -120,6 +217,81 @@ func TestExecutorRevalidatesWorkingTreeImmediatelyBeforeRemoval(t *testing.T) {
 	}
 	if len(git.calls) != 0 {
 		t.Fatalf("destructive Git calls = %v", git.calls)
+	}
+}
+
+func TestExecutorDeletesRetainedBranchOnlyAndResumesBeforeOrAfterDeletion(t *testing.T) {
+	for _, point := range []string{"branch-intent:repo", "branch-mutation:repo"} {
+		t.Run(point, func(t *testing.T) {
+			plan, git := testPlan(t)
+			plan.Repositories[0].BranchOnly = true
+			plan.Repositories[0].Destination = ""
+			plan.Repositories[0].WorkingTreeFingerprint = ""
+			refreshRootFingerprint(t, &plan)
+			git.plan = plan.Repositories[0]
+			git.worktreeExists = false
+			injected := false
+			executor := Executor{Git: git, Locker: fakeLocker{}, Safety: fakeSafety{}, Fault: func(observed string) error {
+				if !injected && observed == point {
+					injected = true
+					return errors.New("crash")
+				}
+				return nil
+			}}
+			if _, err := executor.Execute(context.Background(), plan, plan.WorkName); err == nil || !injected {
+				t.Fatalf("first Execute error=%v, injected=%v", err, injected)
+			}
+			result, err := (Executor{Git: git, Locker: fakeLocker{}, Safety: fakeSafety{}}).Execute(context.Background(), plan, plan.WorkName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.RootRemoved || git.branchExists {
+				t.Fatalf("resumed result=%+v branchExists=%v", result, git.branchExists)
+			}
+			if got := strings.Join(git.calls, ","); got != "delete" {
+				t.Fatalf("Git calls = %q, want only branch deletion", got)
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsMovedOrCheckedOutRetainedBranchBeforeDeletion(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*fakeGit, RepositoryPlan)
+		want  string
+	}{
+		{
+			name: "moved", want: "different commit after confirmation",
+			setup: func(git *fakeGit, plan RepositoryPlan) {
+				git.branchOIDs = map[string]string{plan.BranchRef: "moved"}
+				git.branchExistsByRef = map[string]bool{plan.BranchRef: true}
+			},
+		},
+		{
+			name: "checked out elsewhere", want: "checked out elsewhere",
+			setup: func(git *fakeGit, plan RepositoryPlan) {
+				git.registrations = map[string][]gitops.WorktreeRegistration{plan.SourcePath: {{Path: "/elsewhere", Branch: plan.BranchRef, HeadOID: plan.BranchOID}}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, git := testPlan(t)
+			plan.Repositories[0].BranchOnly = true
+			plan.Repositories[0].Destination = ""
+			plan.Repositories[0].WorkingTreeFingerprint = ""
+			refreshRootFingerprint(t, &plan)
+			git.plan = plan.Repositories[0]
+			git.worktreeExists = false
+			test.setup(git, plan.Repositories[0])
+
+			if _, err := (Executor{Git: git, Locker: fakeLocker{}, Safety: fakeSafety{}}).Execute(context.Background(), plan, plan.WorkName); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Execute error = %v, want %q", err, test.want)
+			}
+			if len(git.calls) != 0 {
+				t.Fatalf("destructive Git calls = %v", git.calls)
+			}
+		})
 	}
 }
 
@@ -293,7 +465,7 @@ func TestExecutorResumesAfterFaultAtEveryRemovalBoundary(t *testing.T) {
 		"worktree-intent:repo", "worktree-mutation:repo", "worktree-completed:repo",
 		"branch-intent:repo", "branch-mutation:repo", "branch-completed:repo",
 		"root-intent", "root-mutation", "root-completed", "archive-published",
-		"active-new-work-deleted", "active-sync-work-deleted", "active-remove-work-deleted",
+		"active-new-work-deleted", "active-sync-work-deleted", "active-change-work-deleted", "active-remove-work-deleted",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
@@ -303,6 +475,13 @@ func TestExecutorResumesAfterFaultAtEveryRemovalBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(syncRecord, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changeRecord := changeWorkRecord(plan)
+			if err := os.MkdirAll(filepath.Dir(changeRecord), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(changeRecord, []byte("{}\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			injected := false
@@ -428,15 +607,25 @@ func writeTestFile(t *testing.T, path, contents string) {
 }
 
 type fakeGit struct {
-	plan             RepositoryPlan
-	branchExists     bool
-	worktreeExists   bool
-	fingerprint      string
-	fingerprints     []string
-	fingerprintCalls int
-	calls            []string
+	plan              RepositoryPlan
+	branchExists      bool
+	worktreeExists    bool
+	fingerprint       string
+	fingerprints      []string
+	fingerprintCalls  int
+	calls             []string
+	identities        map[string]gitops.RepositoryIdentity
+	branchOIDs        map[string]string
+	branchExistsByRef map[string]bool
+	registrations     map[string][]gitops.WorktreeRegistration
 }
 
+func (f *fakeGit) InspectRepository(_ context.Context, path string) (gitops.RepositoryIdentity, error) {
+	if identity, ok := f.identities[path]; ok {
+		return identity, nil
+	}
+	return gitops.RepositoryIdentity{SourcePath: path, CommonDir: f.plan.GitCommonDir}, nil
+}
 func (f *fakeGit) InspectCheckout(context.Context, string) (gitops.Checkout, error) {
 	return gitops.Checkout{Identity: gitops.RepositoryIdentity{CommonDir: f.plan.GitCommonDir}, FullRef: f.plan.BranchRef, HeadOID: f.plan.BranchOID}, nil
 }
@@ -452,13 +641,19 @@ func (f *fakeGit) WorktreeFingerprint(context.Context, string) (string, error) {
 func (f *fakeGit) ActiveOperations(context.Context, string) ([]gitops.ActiveOperation, error) {
 	return nil, nil
 }
-func (f *fakeGit) ListWorktrees(context.Context, string) ([]gitops.WorktreeRegistration, error) {
+func (f *fakeGit) ListWorktrees(_ context.Context, source string) ([]gitops.WorktreeRegistration, error) {
+	if registrations, ok := f.registrations[source]; ok {
+		return registrations, nil
+	}
 	if !f.worktreeExists {
 		return nil, nil
 	}
 	return []gitops.WorktreeRegistration{{Path: f.plan.Destination, Branch: f.plan.BranchRef, HeadOID: f.plan.BranchOID}}, nil
 }
-func (f *fakeGit) LocalBranchOID(context.Context, string, string) (string, bool, error) {
+func (f *fakeGit) LocalBranchOID(_ context.Context, _, branchRef string) (string, bool, error) {
+	if oid, ok := f.branchOIDs[branchRef]; ok {
+		return oid, f.branchExistsByRef[branchRef], nil
+	}
 	return f.plan.BranchOID, f.branchExists, nil
 }
 func (f *fakeGit) RemoveWorktree(_ context.Context, _, destination string) error {
@@ -466,9 +661,12 @@ func (f *fakeGit) RemoveWorktree(_ context.Context, _, destination string) error
 	f.worktreeExists = false
 	return os.RemoveAll(destination)
 }
-func (f *fakeGit) DeleteLocalBranchAtOID(context.Context, string, string, string) error {
+func (f *fakeGit) DeleteLocalBranchAtOID(_ context.Context, _ string, branchRef string, _ string) error {
 	f.calls = append(f.calls, "delete")
 	f.branchExists = false
+	if f.branchExistsByRef != nil {
+		f.branchExistsByRef[branchRef] = false
+	}
 	return nil
 }
 

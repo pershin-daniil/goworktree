@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/pershin-daniil/goworktree/internal/config"
+	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
 func TestOpenProgramReportsLauncherExitError(t *testing.T) {
@@ -27,6 +28,29 @@ func TestOpenProgramReportsLauncherExitError(t *testing.T) {
 	err := openProgram(cfg, "broken", dir)
 	if err == nil || !strings.Contains(err.Error(), "exit status 7") || !strings.Contains(err.Error(), "application not found") {
 		t.Fatalf("openProgram() error = %v", err)
+	}
+}
+
+func TestParseAddArgs(t *testing.T) {
+	name, repositories, mode, err := parseAddArgs([]string{"ticket-42", "--repos", "api, web", "--offline"})
+	if err != nil || name != "ticket-42" || strings.Join(repositories, ",") != "api,web" || mode != newwork.ModeOffline {
+		t.Fatalf("parseAddArgs = %q %v %q, %v", name, repositories, mode, err)
+	}
+	if _, _, _, err := parseAddArgs([]string{"ticket-42", "--repos", "api", "--unknown"}); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("unknown add flag error = %v", err)
+	}
+	if _, _, _, err := parseAddArgs([]string{"ticket-42", "--repos", "api,api"}); err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("duplicate add repository error = %v", err)
+	}
+}
+
+func TestParseDropArgs(t *testing.T) {
+	name, repositories, deleteBranches, yes, err := parseDropArgs([]string{"--repos=api,web", "ticket-42", "-D", "--yes"})
+	if err != nil || name != "ticket-42" || strings.Join(repositories, ",") != "api,web" || !deleteBranches || !yes {
+		t.Fatalf("parseDropArgs = %q %v delete=%v yes=%v, %v", name, repositories, deleteBranches, yes, err)
+	}
+	if _, _, _, _, err := parseDropArgs([]string{"ticket-42", "--repos", "--yes"}); err == nil || !strings.Contains(err.Error(), "requires") {
+		t.Fatalf("missing drop repositories error = %v", err)
 	}
 }
 

@@ -51,11 +51,30 @@ func ReplaceJSON(path string, value any, perm os.FileMode, validateCurrent func(
 			return fmt.Errorf("validate current %s: %w", path, err)
 		}
 	}
-	if err := CleanupAtomicTemps(path); err != nil {
-		return err
-	}
 	data, err := marshalJSON(value)
 	if err != nil {
+		return err
+	}
+	return replaceFile(path, data, perm)
+}
+
+// ReplaceFile atomically replaces an owned regular file after validating its
+// current bytes. It is used for generated workflow artifacts such as go.work.
+func ReplaceFile(path string, data []byte, perm os.FileMode, validateCurrent func([]byte) error) error {
+	current, err := ReadRegularFile(path)
+	if err != nil {
+		return err
+	}
+	if validateCurrent != nil {
+		if err := validateCurrent(current); err != nil {
+			return fmt.Errorf("validate current %s: %w", path, err)
+		}
+	}
+	return replaceFile(path, data, perm)
+}
+
+func replaceFile(path string, data []byte, perm os.FileMode) error {
+	if err := CleanupAtomicTemps(path); err != nil {
 		return err
 	}
 	temp, err := writeTemp(filepath.Dir(path), filepath.Base(path), data, perm)

@@ -14,6 +14,12 @@ discard uncommitted files and commits reachable only from those local branches.
 
 It never deletes or rewrites remote repository branches.
 
+Managed local targets include branches retained by earlier Drop operations.
+These appear as retained-branch-only targets in the plan, with no worktree
+deletion. Their source identity and recorded OID must still match, and the
+branch must not be checked out elsewhere. An already-missing retained ref is
+accepted. The exact Work-name confirmation also authorizes these listed refs.
+
 ## Fixed decisions
 
 1. Remove Work is the terminal lifecycle action. It is not named Finish.
@@ -282,14 +288,14 @@ Verify:
 - no pending target remains in the external operation record.
 
 Then publish `archive.json`, `new-work.json`, optional terminal
-`sync-work.json`, and `remove-work.json` through a hidden staging directory,
+`sync-work.json`, optional `change-work.json`, and `remove-work.json` through a hidden staging directory,
 fsync, and atomic rename to:
 
 ```text
 ~/.config/goworktree/archives/removed-work/<work>-<UTC>-<8hex>/
 ```
 
-After the archive verifies, delete active New Work and terminal Sync records,
+After the archive verifies, delete active New Work, terminal Sync, and Change Work records,
 then delete the active Remove record last. The archive is metadata only; it is
 not a backup of worktree files, uncommitted changes, or commits.
 

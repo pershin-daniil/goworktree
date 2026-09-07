@@ -15,44 +15,62 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/inspectworks"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 	"github.com/pershin-daniil/goworktree/internal/workflow/removework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/repairwork"
+	"github.com/pershin-daniil/goworktree/internal/workflow/sourcerepos"
 	"github.com/pershin-daniil/goworktree/internal/workflow/syncwork"
 )
 
 const (
 	minimumWorkAppWidth  = 80
 	minimumWorkAppHeight = 24
-	detailViewportChrome = 8
+	// workAppChrome reserves the title, subtitle, spacing, and a wrapped hint
+	// (including its top margin). It is deliberately fixed so input handling and
+	// rendering share one viewport/list geometry.
+	workAppChrome = 10
 )
 
 type WorkAppActions struct {
-	Version            string
-	Load               func(context.Context) (inspectworks.Snapshot, error)
-	Repositories       []WorkRepositoryOption
-	Programs           []WorkProgramOption
-	ConflictProgram    string
-	SetConflictProgram func(context.Context, string) error
-	PlanNewWork        func(context.Context, newwork.Request) (newwork.Plan, error)
-	CreateNewWork      func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
-	ResumeNewWork      func(context.Context, string) (newwork.ExecutionResult, error)
-	OpenWork           func(context.Context, WorkOpenRequest) error
-	OpenConflict       func(context.Context, SyncConflictOpenRequest) (string, error)
-	PlanSyncWork       func(context.Context, string) (syncwork.Plan, error)
-	RunSyncWork        func(context.Context, syncwork.Plan) (syncwork.Result, error)
-	PlanRemoveWork     func(context.Context, string) (removework.Plan, error)
-	RunRemoveWork      func(context.Context, removework.Plan, string) (removework.Result, error)
-	PlanRepairWork     func(context.Context, string) (repairwork.Plan, error)
-	RunRepairWork      func(context.Context, repairwork.Plan) (repairwork.Result, error)
+	Version                string
+	Load                   func(context.Context) (inspectworks.Snapshot, error)
+	Repositories           []WorkRepositoryOption
+	Programs               []WorkProgramOption
+	ConflictProgram        string
+	SetConflictProgram     func(context.Context, string) error
+	PlanNewWork            func(context.Context, newwork.Request) (newwork.Plan, error)
+	CreateNewWork          func(context.Context, newwork.Plan) (newwork.ExecutionResult, error)
+	ResumeNewWork          func(context.Context, string) (newwork.ExecutionResult, error)
+	PlanAddRepositories    func(context.Context, changework.AddRequest) (changework.Plan, error)
+	PlanRemoveRepositories func(context.Context, changework.RemoveRequest) (changework.Plan, error)
+	RunRepositoryChange    func(context.Context, changework.Plan) (changework.Result, error)
+	ResumeRepositoryChange func(context.Context, string) (changework.Result, error)
+	OpenWork               func(context.Context, WorkOpenRequest) error
+	OpenConflict           func(context.Context, SyncConflictOpenRequest) (string, error)
+	PlanSyncWork           func(context.Context, string) (syncwork.Plan, error)
+	RunSyncWork            func(context.Context, syncwork.Plan) (syncwork.Result, error)
+	PlanRemoveWork         func(context.Context, string) (removework.Plan, error)
+	RunRemoveWork          func(context.Context, removework.Plan, string) (removework.Result, error)
+	PlanRepairWork         func(context.Context, string) (repairwork.Plan, error)
+	RunRepairWork          func(context.Context, repairwork.Plan) (repairwork.Result, error)
+	LoadSourceRepos        func(context.Context) (sourcerepos.Snapshot, error)
+	FetchSourceRepos       func(context.Context, []string) (sourcerepos.Result, error)
+	PlanSourceUpdate       func(context.Context, []string) (sourcerepos.Plan, error)
+	RunSourceUpdate        func(context.Context, sourcerepos.Plan) (sourcerepos.Result, error)
+	OpenSourceRepo         func(context.Context, string, string) error
+	AddSourceGroup         func(context.Context, []string, string) error
+	RemoveSourceGroup      func(context.Context, []string, string) error
+	ScanSourceRepos        func(context.Context) (string, error)
 }
 
 type WorkRepositoryOption struct {
-	ID   string
-	Name string
-	Path string
+	ID     string
+	Name   string
+	Path   string
+	Groups []string
 }
 
 type WorkProgramOption struct {
@@ -86,11 +104,24 @@ const (
 	workConflictProgram
 	workNewName
 	workNewRepositories
+	workNewRepositoryFilter
+	workChangeRepositories
+	workChangePlan
+	workChangeConfirm
 	workNewPlan
 	workSyncPlan
 	workRemovePlan
 	workRemoveConfirm
 	workRepairPlan
+	workSourceLoading
+	workSourceHome
+	workSourceRepository
+	workSourceFilter
+	workSourceActions
+	workSourceUpdatePlan
+	workSourceGroupInput
+	workSourceRemoveGroup
+	workHelp
 	workOperation
 	workActionResult
 )
@@ -104,6 +135,9 @@ const (
 	workItemCollectionProblem
 	workItemAction
 	workItemNewRepository
+	workItemSourceRepository
+	workItemSourceFilter
+	workItemSourceGroup
 )
 
 type workItem struct {
@@ -134,6 +168,18 @@ type newWorkPlannedMsg struct {
 type newWorkCreatedMsg struct {
 	generation uint64
 	result     newwork.ExecutionResult
+	err        error
+}
+
+type repositoryChangePlannedMsg struct {
+	generation uint64
+	plan       changework.Plan
+	err        error
+}
+
+type repositoryChangeCompletedMsg struct {
+	generation uint64
+	result     changework.Result
 	err        error
 }
 
@@ -192,42 +238,111 @@ type repairWorkCompletedMsg struct {
 	err        error
 }
 
+type sourceReposLoadedMsg struct {
+	generation uint64
+	snapshot   sourcerepos.Snapshot
+	err        error
+}
+
+type sourceReposFetchedMsg struct {
+	generation uint64
+	result     sourcerepos.Result
+	err        error
+}
+
+type sourceUpdatePlannedMsg struct {
+	generation uint64
+	plan       sourcerepos.Plan
+	err        error
+}
+
+type sourceUpdateCompletedMsg struct {
+	generation uint64
+	result     sourcerepos.Result
+	err        error
+}
+
+type sourceRepoOpenedMsg struct {
+	generation uint64
+	program    string
+	err        error
+}
+
+type sourceGroupChangedMsg struct {
+	generation uint64
+	group      string
+	action     string
+	err        error
+}
+
+type sourceReposScannedMsg struct {
+	generation uint64
+	summary    string
+	err        error
+}
+
 type workAppModel struct {
-	actions          WorkAppActions
-	ctx              context.Context
-	cancel           context.CancelFunc
-	screen           workScreen
-	restoreScreen    workScreen
-	snapshot         inspectworks.Snapshot
-	list             list.Model
-	viewport         viewport.Model
-	width            int
-	height           int
-	generation       uint64
-	selectedWorkName string
-	selectedRepoID   string
-	selectedWork     int
-	detailTitle      string
-	detailContent    string
-	input            textinput.Model
-	actionReturn     workScreen
-	actionNotice     string
-	selectedNewRepos map[string]bool
-	newWorkMode      newwork.Mode
-	newWorkPlan      newwork.Plan
-	syncWorkPlan     syncwork.Plan
-	syncWorkResult   syncwork.Result
-	syncConflictPath string
-	removeWorkPlan   removework.Plan
-	repairWorkPlan   repairwork.Plan
-	operationCancel  context.CancelFunc
-	operationID      uint64
-	operationTitle   string
-	operationMessage string
-	operationKind    string
-	resultReturn     workScreen
-	resultRefresh    bool
-	quitting         bool
+	actions              WorkAppActions
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	screen               workScreen
+	restoreScreen        workScreen
+	snapshot             inspectworks.Snapshot
+	list                 list.Model
+	viewport             viewport.Model
+	width                int
+	height               int
+	generation           uint64
+	selectedWorkName     string
+	selectedRepoID       string
+	selectedWork         int
+	detailTitle          string
+	detailContent        string
+	input                textinput.Model
+	actionReturn         workScreen
+	actionNotice         string
+	selectedNewRepos     map[string]bool
+	newWorkFilter        string
+	selectedChangeRepos  map[string]bool
+	changeKind           changework.Kind
+	changeMode           newwork.Mode
+	changeDeleteBranches bool
+	changePlan           changework.Plan
+	newWorkMode          newwork.Mode
+	newWorkPlan          newwork.Plan
+	syncWorkPlan         syncwork.Plan
+	syncWorkResult       syncwork.Result
+	syncConflictPath     string
+	removeWorkPlan       removework.Plan
+	repairWorkPlan       repairwork.Plan
+	sourceSnapshot       sourcerepos.Snapshot
+	sourceLoaded         bool
+	sourceFilter         string
+	selectedSources      map[string]bool
+	selectedSourceID     string
+	sourcePlan           sourcerepos.Plan
+	sourceActionIDs      []string
+	operationCancel      context.CancelFunc
+	sourceLoadCancel     context.CancelFunc
+	sourceLoadReturn     workScreen
+	operationID          uint64
+	operationTitle       string
+	operationMessage     string
+	operationKind        string
+	resultReturn         workScreen
+	resultRefresh        bool
+	helpState            workHelpState
+	quitting             bool
+}
+
+type workHelpState struct {
+	screen        workScreen
+	detailTitle   string
+	detailContent string
+	viewport      viewport.Model
+	list          list.Model
+	actionReturn  workScreen
+	actionNotice  string
 }
 
 func RunWorkApp(actions WorkAppActions) error {
@@ -250,9 +365,10 @@ func newWorkAppModel(actions WorkAppActions, ctx context.Context, cancel context
 	model := workAppModel{
 		actions: actions, ctx: ctx, cancel: cancel, screen: workLoading,
 		restoreScreen: workHome, width: minimumWorkAppWidth, height: minimumWorkAppHeight,
-		input: input, selectedNewRepos: make(map[string]bool), newWorkMode: newwork.ModeOnline,
+		input: input, selectedNewRepos: make(map[string]bool), selectedChangeRepos: make(map[string]bool),
+		selectedSources: make(map[string]bool), newWorkMode: newwork.ModeOnline, changeMode: newwork.ModeOnline,
 	}
-	model.viewport = viewport.New(minimumWorkAppWidth-4, minimumWorkAppHeight-detailViewportChrome)
+	model.viewport = viewport.New(minimumWorkAppWidth-4, minimumWorkAppHeight-workAppChrome)
 	model.generation = 1
 	return model
 }
@@ -290,6 +406,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleNewWorkPlanned(msg)
 	case newWorkCreatedMsg:
 		return m.handleNewWorkCreated(msg)
+	case repositoryChangePlannedMsg:
+		return m.handleRepositoryChangePlanned(msg)
+	case repositoryChangeCompletedMsg:
+		return m.handleRepositoryChangeCompleted(msg)
 	case workOpenedMsg:
 		return m.handleWorkOpened(msg)
 	case syncWorkPlannedMsg:
@@ -308,6 +428,20 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleRepairWorkPlanned(msg)
 	case repairWorkCompletedMsg:
 		return m.handleRepairWorkCompleted(msg)
+	case sourceReposLoadedMsg:
+		return m.handleSourceReposLoaded(msg)
+	case sourceReposFetchedMsg:
+		return m.handleSourceReposFetched(msg)
+	case sourceUpdatePlannedMsg:
+		return m.handleSourceUpdatePlanned(msg)
+	case sourceUpdateCompletedMsg:
+		return m.handleSourceUpdateCompleted(msg)
+	case sourceRepoOpenedMsg:
+		return m.handleSourceRepoOpened(msg)
+	case sourceGroupChangedMsg:
+		return m.handleSourceGroupChanged(msg)
+	case sourceReposScannedMsg:
+		return m.handleSourceReposScanned(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -316,6 +450,10 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operationCancel()
 					m.operationMessage = "Cancellation requested; waiting for the current safe boundary…"
 				}
+				return m, nil
+			}
+			if m.screen == workSourceLoading {
+				m.cancelSourceRefresh()
 				return m, nil
 			}
 			m.cancelLoad()
@@ -341,14 +479,36 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == workNewName {
 			return m.updateNewWorkName(msg)
 		}
+		if m.screen == workSourceGroupInput {
+			return m.updateSourceGroupInput(msg)
+		}
 		if m.screen == workConflictProgram {
 			return m.updateConflictProgram(msg)
+		}
+		if m.screen == workNewRepositoryFilter {
+			return m.updateNewWorkRepositoryFilter(msg)
 		}
 		if m.screen == workOperation {
 			return m, nil
 		}
+		if m.screen == workHelp {
+			return m.updateHelp(msg)
+		}
+		if key == "?" && m.canShowHelp() {
+			m.openContextHelp()
+			return m, nil
+		}
+		if m.screen == workSourceUpdatePlan {
+			return m.updateSourceUpdatePlan(msg)
+		}
 		if m.screen == workNewPlan {
 			return m.updateNewWorkPlan(msg)
+		}
+		if m.screen == workChangePlan {
+			return m.updateRepositoryChangePlan(msg)
+		}
+		if m.screen == workChangeConfirm {
+			return m.updateRepositoryChangeConfirm(msg)
 		}
 		if m.screen == workSyncPlan {
 			return m.updateSyncWorkPlan(msg)
@@ -365,6 +525,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == workActionResult {
 			return m.updateActionResult(msg)
 		}
+		if m.isSourceScreen() {
+			return m.updateSourceScreen(msg)
+		}
 		if m.isListScreen() && m.list.FilterState() == list.Filtering {
 			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(msg)
@@ -377,6 +540,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key == "n" && m.screen == workHome {
 			m.beginNewWork()
 			return m, nil
+		}
+		if (key == "tab" || key == "shift+tab") && m.screen == workHome {
+			return m.beginSourceRepositories()
 		}
 		if key == "r" && m.canRefresh() {
 			return m.beginRefresh()
@@ -394,6 +560,9 @@ func (m workAppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == workNewRepositories {
 			return m.updateNewWorkRepositories(msg)
+		}
+		if m.screen == workChangeRepositories {
+			return m.updateRepositoryChangeRepositories(msg)
 		}
 		if m.list.FilterState() != list.Filtering {
 			switch key {
@@ -543,7 +712,7 @@ func (m *workAppModel) setWork(name, selectRepo string) bool {
 func (m *workAppModel) setList(items []list.Item) {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
-	m.list = list.New(items, delegate, max(40, m.width), max(8, m.height-8))
+	m.list = list.New(items, delegate, max(40, m.width), max(4, m.height-workAppChrome))
 	m.list.SetShowTitle(false)
 	m.list.SetShowStatusBar(false)
 	m.list.SetShowHelp(false)
@@ -657,13 +826,13 @@ func (m *workAppModel) setDetail(title, content string) {
 }
 
 func (m *workAppModel) resize() {
-	listHeight := max(8, m.height-8)
+	listHeight := max(4, m.height-workAppChrome)
 	if m.isListScreen() {
 		m.list.SetSize(max(40, m.width), listHeight)
 	}
 	m.input.Width = min(72, max(20, m.width-6))
 	m.viewport.Width = max(40, m.width-4)
-	m.viewport.Height = max(8, m.height-detailViewportChrome)
+	m.viewport.Height = max(4, m.height-workAppChrome)
 	if m.detailContent != "" {
 		offset := m.viewport.YOffset
 		m.viewport.SetContent(m.renderDetailContent())
@@ -694,7 +863,7 @@ func (m workAppModel) View() string {
 		if len(m.snapshot.Problems) > 0 {
 			contextLine += fmt.Sprintf(" · %d inspection issues", len(m.snapshot.Problems))
 		}
-		return m.listView("Works", contextLine, "j/k move  l/enter open  n new  : actions  / search  r refresh  q quit")
+		return m.listView("[ Works ]  Repositories", contextLine, "tab repositories  j/k move  l/enter open  n new  : actions  / search  r refresh  q quit")
 	case workOverview:
 		entry := m.currentWork()
 		contextLine := ""
@@ -718,11 +887,19 @@ func (m workAppModel) View() string {
 	case workNewName:
 		return m.newWorkNameView()
 	case workNewRepositories:
-		contextLine := fmt.Sprintf("Work · %s · mode %s · %d selected", m.input.Value(), m.newWorkMode, len(m.selectedRepositoryIDs()))
+		contextLine := fmt.Sprintf("Work · %s · mode %s · group %s · %d selected", m.input.Value(), m.newWorkMode, sourceFilterLabel(m.newWorkFilter), len(m.selectedRepositoryIDs()))
 		if m.actionNotice != "" {
 			contextLine += " · " + m.actionNotice
 		}
-		return m.listView("New Work · repositories", contextLine, "space toggle  m mode  enter plan  h/esc back  / search  q quit")
+		return m.listView("New Work · repositories", contextLine, "space toggle  f group  m mode  enter plan  h/esc back  / search  q quit")
+	case workNewRepositoryFilter:
+		return m.listView("New Work · group filter", sourceFilterLabel(m.newWorkFilter), "j/k move  l/enter select  h/esc back  / search  q quit")
+	case workChangeRepositories:
+		return m.repositoryChangeRepositoriesView()
+	case workChangePlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter apply  h/esc back  q quit")
+	case workChangeConfirm:
+		return m.repositoryChangeConfirmView()
 	case workNewPlan:
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/c create  h/esc back  q quit")
 	case workSyncPlan:
@@ -733,6 +910,28 @@ func (m workAppModel) View() string {
 		return m.removeWorkConfirmView()
 	case workRepairPlan:
 		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/r repair  h/esc back  q quit")
+	case workSourceLoading:
+		return Title("Works  [ Repositories ]") + "\n" + subtitleStyle.Render("Inspecting local source repositories…") + "\n\n" + hintStyle.Render("esc/ctrl+c cancel  q quit")
+	case workSourceHome:
+		return m.sourceHomeView()
+	case workSourceRepository:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  h/esc back  : actions  r refresh  q quit")
+	case workSourceFilter:
+		return m.listView("Repository group filter", sourceFilterLabel(m.sourceFilter), "j/k move  l/enter select  h/esc back  / search  q quit")
+	case workSourceActions:
+		contextLine := fmt.Sprintf("%d repositories in scope", len(m.sourceActionIDs))
+		if m.actionNotice != "" {
+			contextLine += " · " + m.actionNotice
+		}
+		return m.listView("Repository actions", contextLine, "j/k move  l/enter select  h/esc close  / search  q quit")
+	case workSourceUpdatePlan:
+		return m.detailView("j/k scroll  ctrl+u/d page  g/G top/bottom  enter/u update  h/esc back  q quit")
+	case workSourceGroupInput:
+		return m.sourceGroupInputView()
+	case workSourceRemoveGroup:
+		return m.listView("Remove group", fmt.Sprintf("%d repositories in scope", len(m.sourceActionIDs)), "j/k move  l/enter remove  h/esc back  / search  q quit")
+	case workHelp:
+		return m.detailView("enter/h/esc back  q quit")
 	case workOperation:
 		return m.operationView()
 	case workActionResult:
@@ -747,26 +946,34 @@ func (m workAppModel) View() string {
 }
 
 func (m workAppModel) listView(title, contextLine, hint string) string {
+	hint = m.wrapHint(hint)
 	return Title(terminalSafe(title, false)) + "\n" + subtitleStyle.Render(truncate(terminalSafe(contextLine, false), m.width)) + "\n\n" + m.list.View() + "\n" + hintStyle.Render(hint)
 }
 
 func (m workAppModel) detailView(hint string) string {
+	hint = m.wrapHint(hint)
 	subtitle := "Read-only details"
 	switch m.screen {
 	case workProblem:
 		subtitle = "Read-only problem details"
 	case workRepository:
 		subtitle = "Observed Git and filesystem state"
+	case workSourceRepository:
+		subtitle = "Observed local source repository state"
 	case workLoadError:
 		subtitle = "Inspection did not complete"
 	case workNewPlan:
 		subtitle = "Review the exact mutation plan"
+	case workChangePlan:
+		subtitle = "Review the exact repository-set mutation plan"
 	case workSyncPlan:
 		subtitle = "Review fetched immutable base commits"
 	case workRemovePlan:
 		subtitle = "Irreversible local deletion plan"
 	case workRepairPlan:
 		subtitle = "Only deterministic repairs are included"
+	case workSourceUpdatePlan:
+		subtitle = "Review fetched immutable target commits"
 	case workActionResult:
 		subtitle = "Operation result"
 	}
@@ -795,6 +1002,49 @@ func (m workAppModel) operationView() string {
 
 func (m workAppModel) tooSmall() bool {
 	return m.width < minimumWorkAppWidth || m.height < minimumWorkAppHeight
+}
+
+func (m workAppModel) canShowHelp() bool {
+	if m.isListScreen() && m.list.FilterState() == list.Filtering {
+		return false
+	}
+	switch m.screen {
+	case workHome, workOverview, workRepository, workProblem, workActions,
+		workSourceHome, workSourceRepository, workSourceFilter, workSourceActions, workSourceRemoveGroup:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *workAppModel) openContextHelp() {
+	m.helpState = workHelpState{
+		screen: m.screen, detailTitle: m.detailTitle, detailContent: m.detailContent,
+		viewport: m.viewport, list: m.list, actionReturn: m.actionReturn, actionNotice: m.actionNotice,
+	}
+	if m.isSourceScreen() {
+		m.setDetail("Repository dashboard help", "Tab switches Works and Repositories.\n\nIn Repositories: Space selects one, a toggles all visible, f filters by group, / searches, and : acts on the selection (including hidden selections).\n\nFetch updates remote-tracking refs. Update default branch first shows a plan; Enter applies only its eligible local changes. r refreshes local state without fetching.\n\nEsc goes back. Ctrl+C cancels an operation or source inspection; otherwise it quits.")
+	} else {
+		m.setDetail("Work dashboard help", "Tab switches Works and Repositories.\n\nn starts New Work. : opens actions for the focused Work. / searches, r refreshes local inspection, and Enter opens the selected item.\n\nWork creation, repository changes, Sync, Remove, and Repair show a plan before applying changes. Esc goes back. Ctrl+C requests cancellation while an operation is running; elsewhere it quits.")
+	}
+	m.screen = workHelp
+}
+
+func (m workAppModel) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "h", "esc":
+		m.screen = m.helpState.screen
+		m.detailTitle, m.detailContent = m.helpState.detailTitle, m.helpState.detailContent
+		m.viewport, m.list = m.helpState.viewport, m.helpState.list
+		m.actionReturn, m.actionNotice = m.helpState.actionReturn, m.helpState.actionNotice
+		return m, nil
+	case "q":
+		m.cancelLoad()
+		m.quitting = true
+		return m, tea.Quit
+	}
+	m.scrollDetail(msg)
+	return m, nil
 }
 
 func (m *workAppModel) cancelLoad() {
@@ -826,6 +1076,9 @@ func workEntryDescription(entry inspectworks.Work) string {
 	}
 	if entry.Snapshot.Operation.ResumeSuggested {
 		parts = append(parts, "Resume New Work available")
+	}
+	if entry.Snapshot.ChangeOperation.ResumeSuggested {
+		parts = append(parts, "Resume repository change available")
 	}
 	if count := entry.ProblemCount(); count > 0 {
 		parts = append(parts, plural(count, "problem", "problems"))
@@ -865,6 +1118,9 @@ func workContext(entry inspectworks.Work) string {
 		parts = append(parts, "manifest: "+string(entry.Snapshot.Manifest.State))
 		if entry.Snapshot.Operation.Phase != "" {
 			parts = append(parts, "New Work: "+entry.Snapshot.Operation.Phase)
+		}
+		if entry.Snapshot.ChangeOperation.Phase != "" {
+			parts = append(parts, "repository change: "+entry.Snapshot.ChangeOperation.Phase)
 		}
 	}
 	return strings.Join(parts, " · ")
@@ -1054,6 +1310,32 @@ func truncate(value string, width int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes) + "…"
+}
+
+func (m workAppModel) wrapHint(value string) string {
+	width := max(20, m.width)
+	words := strings.Fields(terminalSafe(value, false))
+	if len(words) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 2)
+	line := ""
+	for _, word := range words {
+		candidate := word
+		if line != "" {
+			candidate = line + " " + word
+		}
+		if line != "" && lipgloss.Width(candidate) > width {
+			lines = append(lines, line)
+			line = word
+			continue
+		}
+		line = candidate
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func inspectedLabel(value time.Time) string {

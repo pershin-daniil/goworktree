@@ -51,6 +51,7 @@ type PublishRequest struct {
 	CreatedAt        time.Time
 	NewWorkRecord    string
 	SyncWorkRecord   string
+	ChangeWorkRecord string
 	RemoveWorkRecord string
 }
 
@@ -147,6 +148,7 @@ func (s Store) Publish(request PublishRequest) (Summary, error) {
 	}{
 		{name: "new-work.json", path: request.NewWorkRecord},
 		{name: "sync-work.json", path: request.SyncWorkRecord, optional: true},
+		{name: "change-work.json", path: request.ChangeWorkRecord, optional: true},
 		{name: "remove-work.json", path: request.RemoveWorkRecord},
 	}
 	manifest := Manifest{
@@ -312,7 +314,7 @@ func validateDirectory(path, id string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("archive manifest Work identity is invalid")
 	}
 	for _, file := range manifest.Files {
-		if file.Name != "new-work.json" && file.Name != "sync-work.json" && file.Name != "remove-work.json" {
+		if file.Name != "new-work.json" && file.Name != "sync-work.json" && file.Name != "change-work.json" && file.Name != "remove-work.json" {
 			return Manifest{}, fmt.Errorf("archive manifest contains unsafe file %q", file.Name)
 		}
 		if allowed[file.Name] {

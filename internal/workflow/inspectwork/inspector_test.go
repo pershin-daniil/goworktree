@@ -13,6 +13,7 @@ import (
 	gitops "github.com/pershin-daniil/goworktree/internal/git"
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
 	"github.com/pershin-daniil/goworktree/internal/work"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
@@ -54,6 +55,88 @@ func TestInspectHealthyWorkReportsDirtyFactsWithoutProblems(t *testing.T) {
 	}
 	if !snapshot.Harness.VerifiedAgainstOperation {
 		t.Fatal("go.work was not verified against recorded intent")
+	}
+}
+
+func TestModifiedManifestKeepsNewWorkAsCreationProvenance(t *testing.T) {
+	t.Parallel()
+
+	fixture := createCompletedWork(t, "inspect-modified", map[string]bool{"api": true})
+	var manifest work.Manifest
+	if err := work.LoadJSON(fixture.Plan.ManifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	record, err := (newwork.OperationStore{}).Load(fixture.Plan.OperationRecordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SchemaVersion = work.ManifestSchemaVersion
+	manifest.Revision = 1
+	manifest.LastChangeID = strings.Repeat("b", 32)
+	if err := matchManifestAndOperation(manifest, record); err != nil {
+		t.Fatalf("modified manifest rejected immutable New Work provenance: %v", err)
+	}
+}
+
+func TestIncompleteRepositoryChangeSuggestsResume(t *testing.T) {
+	t.Parallel()
+
+	name, _ := work.ParseName("inspect-change")
+	manifest := work.Manifest{Revision: 1, LastChangeID: strings.Repeat("b", 32)}
+	snapshot := Snapshot{
+		WorkName: name, WorkID: work.Identity("work-id"), WorkRoot: "/works/inspect-change", Manifest: ManifestSnapshot{
+			State: MetadataValid, Value: &manifest,
+		},
+		ChangeOperation: ChangeOperationSnapshot{Path: "/control/change.json"},
+	}
+	record := changework.OperationRecord{
+		OperationID: strings.Repeat("b", 32), WorkID: snapshot.WorkID,
+		Phase: changework.PhaseInterrupted,
+		Plan:  changework.Plan{WorkName: name, WorkRoot: snapshot.WorkRoot},
+	}
+	classifyChangeWorkRecovery(&snapshot, record, true, true)
+	if !snapshot.ChangeOperation.ResumeSuggested || len(snapshot.Problems) != 1 || snapshot.Problems[0].Next != ActionResumeChangeWork {
+		t.Fatalf("change recovery classification = %+v", snapshot)
+	}
+}
+
+func TestCompletedRepositoryChangeMustMatchExactManifest(t *testing.T) {
+	t.Parallel()
+
+	name, _ := work.ParseName("inspect-change-match")
+	operationID := strings.Repeat("b", 32)
+	manifest := work.Manifest{Revision: 1, LastChangeID: operationID, Name: name}
+	changed := manifest
+	changed.Harness.Kind = "unexpected"
+	snapshot := Snapshot{
+		WorkName: name, WorkID: work.Identity("work-id"), WorkRoot: "/works/inspect-change-match",
+		Manifest:        ManifestSnapshot{State: MetadataValid, Value: &changed},
+		ChangeOperation: ChangeOperationSnapshot{Path: "/control/change.json"},
+	}
+	record := changework.OperationRecord{
+		OperationID: operationID, WorkID: snapshot.WorkID, Phase: changework.PhaseCompleted,
+		Plan: changework.Plan{WorkName: name, WorkRoot: snapshot.WorkRoot, After: manifest},
+	}
+	classifyChangeWorkRecovery(&snapshot, record, true, true)
+	if !hasProblem(snapshot, ProblemChangeOperationMismatch) {
+		t.Fatalf("exact manifest mismatch was not reported: %+v", snapshot.Problems)
+	}
+}
+
+func TestInspectHarnessHonorsEmptyExplicitIntent(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	snapshot := Snapshot{
+		Manifest: ManifestSnapshot{Value: &work.Manifest{Harness: work.HarnessIntent{
+			Kind: "go.work", RootModulesOnly: false,
+		}}},
+		Harness:      HarnessSnapshot{Path: filepath.Join(root, "go.work")},
+		Repositories: []RepositorySnapshot{{Intent: work.RepositoryIntent{IncludeInGoWork: true}}},
+	}
+	(Inspector{}).inspectHarness(&snapshot, newwork.OperationRecord{}, false)
+	if len(snapshot.Problems) != 0 || snapshot.Harness.Kind != PathMissing {
+		t.Fatalf("empty explicit harness inspection = %+v", snapshot)
 	}
 }
 
@@ -391,7 +474,10 @@ func (f completedWorkFixture) inspect(now func() time.Time) (Snapshot, error) {
 }
 
 func testInspector(now func() time.Time) Inspector {
-	return Inspector{Git: SystemGit{}, Operations: SystemOperationReader{}, Now: now}
+	return Inspector{
+		Git: SystemGit{}, Operations: SystemOperationReader{},
+		ChangeOperations: SystemChangeOperationReader{}, Now: now,
+	}
 }
 
 func newRepository(t *testing.T, module bool) string {

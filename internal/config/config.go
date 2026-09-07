@@ -40,10 +40,11 @@ type Config struct {
 }
 
 type Repo struct {
-	Path          string `json:"path,omitempty"`
-	DefaultBranch string `json:"default_branch,omitempty"`
-	Remote        string `json:"remote,omitempty"`
-	Alias         string `json:"alias,omitempty"`
+	Path          string   `json:"path,omitempty"`
+	DefaultBranch string   `json:"default_branch,omitempty"`
+	Remote        string   `json:"remote,omitempty"`
+	Alias         string   `json:"alias,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 func Default() *Config {
@@ -128,6 +129,9 @@ func Load() (*Config, error) {
 	if cfg.Repos == nil {
 		cfg.Repos = map[string]Repo{}
 	}
+	if err := cfg.normalizeRepoGroups(); err != nil {
+		return nil, fmt.Errorf("validate repository groups: %w", err)
+	}
 	if cfg.ScanDepth <= 0 {
 		cfg.ScanDepth = DefaultScanDepth
 	}
@@ -155,6 +159,9 @@ func (c *Config) Save() error {
 		c.CommandTimeoutSeconds = DefaultCommandTimeoutSeconds
 	}
 	c.NormalizePrograms()
+	if err := c.normalizeRepoGroups(); err != nil {
+		return fmt.Errorf("validate repository groups: %w", err)
+	}
 
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -215,6 +222,27 @@ func ValidProgramID(id string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// ValidGroupName reports whether name is a conservative portable group name.
+// It accepts ASCII letters, digits, dots, underscores, and hyphens, and must
+// begin with an ASCII letter or digit.
+func ValidGroupName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		letter := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z'
+		digit := ch >= '0' && ch <= '9'
+		if i == 0 && !letter && !digit {
+			return false
+		}
+		if !letter && !digit && ch != '.' && ch != '_' && ch != '-' {
+			return false
+		}
 	}
 	return true
 }
@@ -364,6 +392,197 @@ func (c *Config) RepoAlias(id string) string {
 		return filepath.Base(repo.Path)
 	}
 	return id
+}
+
+// RepoGroups returns a copy of the configured groups for id.
+func (c *Config) RepoGroups(id string) []string {
+	repo, ok := c.Repos[id]
+	if !ok || len(repo.Groups) == 0 {
+		return nil
+	}
+	return append([]string(nil), repo.Groups...)
+}
+
+// GroupNames returns all configured group names in lexical order.
+func (c *Config) GroupNames() []string {
+	groups := make(map[string]struct{})
+	for _, repo := range c.Repos {
+		for _, group := range repo.Groups {
+			groups[group] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(groups))
+	for group := range groups {
+		names = append(names, group)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// AddRepoGroup adds group to every specified repository.
+func (c *Config) AddRepoGroup(ids []string, group string) error {
+	if err := validateGroupName(group); err != nil {
+		return err
+	}
+	if err := c.validateRepoGroups(); err != nil {
+		return err
+	}
+	if err := c.requireRepoIDs(ids); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		repo := c.Repos[id]
+		repo.Groups = append(repo.Groups, group)
+		c.Repos[id] = repo
+	}
+	return c.normalizeRepoGroups()
+}
+
+// RemoveRepoGroup removes group from every specified repository.
+func (c *Config) RemoveRepoGroup(ids []string, group string) error {
+	if err := validateGroupName(group); err != nil {
+		return err
+	}
+	if err := c.validateRepoGroups(); err != nil {
+		return err
+	}
+	if err := c.requireRepoIDs(ids); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		repo := c.Repos[id]
+		repo.Groups = removeGroup(repo.Groups, group)
+		c.Repos[id] = repo
+	}
+	return c.normalizeRepoGroups()
+}
+
+// RenameGroup replaces old with new in every repository that uses old.
+func (c *Config) RenameGroup(old, new string) error {
+	if err := validateGroupName(old); err != nil {
+		return err
+	}
+	if err := validateGroupName(new); err != nil {
+		return err
+	}
+	if err := c.validateRepoGroups(); err != nil {
+		return err
+	}
+	found := false
+	for _, repo := range c.Repos {
+		for _, group := range repo.Groups {
+			if group == old {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("repository group %q does not exist", old)
+	}
+	for id, repo := range c.Repos {
+		for i, group := range repo.Groups {
+			if group == old {
+				repo.Groups[i] = new
+			}
+		}
+		c.Repos[id] = repo
+	}
+	return c.normalizeRepoGroups()
+}
+
+// DeleteGroup removes group from every repository that uses it.
+func (c *Config) DeleteGroup(group string) error {
+	if err := validateGroupName(group); err != nil {
+		return err
+	}
+	if err := c.validateRepoGroups(); err != nil {
+		return err
+	}
+	found := false
+	for _, repo := range c.Repos {
+		for _, existing := range repo.Groups {
+			if existing == group {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("repository group %q does not exist", group)
+	}
+	for id, repo := range c.Repos {
+		repo.Groups = removeGroup(repo.Groups, group)
+		c.Repos[id] = repo
+	}
+	return c.normalizeRepoGroups()
+}
+
+func validateGroupName(group string) error {
+	if !ValidGroupName(group) {
+		return fmt.Errorf("invalid repository group %q", group)
+	}
+	return nil
+}
+
+func (c *Config) validateRepoGroups() error {
+	for id, repo := range c.Repos {
+		for _, group := range repo.Groups {
+			if err := validateGroupName(group); err != nil {
+				return fmt.Errorf("repository %q: %w", id, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Config) normalizeRepoGroups() error {
+	if err := c.validateRepoGroups(); err != nil {
+		return err
+	}
+	for id, repo := range c.Repos {
+		repo.Groups = normalizeGroups(repo.Groups)
+		c.Repos[id] = repo
+	}
+	return nil
+}
+
+func (c *Config) requireRepoIDs(ids []string) error {
+	for _, id := range ids {
+		if _, ok := c.Repos[id]; !ok {
+			return fmt.Errorf("repository %q does not exist", id)
+		}
+	}
+	return nil
+}
+
+func normalizeGroups(groups []string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	unique := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		unique[group] = struct{}{}
+	}
+	normalized := make([]string, 0, len(unique))
+	for group := range unique {
+		normalized = append(normalized, group)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func removeGroup(groups []string, target string) []string {
+	filtered := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if group != target {
+			filtered = append(filtered, group)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func (c *Config) RepoNames() []string {

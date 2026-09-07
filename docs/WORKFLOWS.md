@@ -259,11 +259,11 @@ Next: prune the stale registration and resume New Work
 ```text
 Setup / Empty state
         ↓
-Works home snapshot
-        ↓
-Work detail
-        ↓
-Repository detail
+Dashboard
+  ├─ Works home snapshot → Work detail → Work repository detail
+  └─ Source repository catalog → Source repository detail
+
+Source repository catalog → group filter → same repository list
 
 Any context → scoped action palette
 Mutation → Inputs → Plan → Progress → Verified result / Recovery
@@ -287,12 +287,15 @@ Outside text input:
 
 | Key | Action |
 | --- | --- |
+| `Tab` / `Shift+Tab` | Switch Works / Source Repositories at dashboard level |
 | `j` / `k` | Move down / up |
 | `h` | Go back |
 | `l` / `Enter` | Open or select |
 | `g` / `G` | First / last item |
 | `Ctrl+u` / `Ctrl+d` | Half-page up / down |
 | `/` | Search |
+| `f` | Filter source repositories or New Work choices by group |
+| `Space` | Toggle repository selection in source and New Work catalogs |
 | `n` / `N` | Next / previous search result |
 | `:` | Open scoped action palette |
 | `r` | Refresh or reinspect |
@@ -447,12 +450,17 @@ This workflow covers:
 - initial setup;
 - rescan after repositories are added, removed, or moved;
 - changing repository alias, source path, base preference, or remote;
+- assigning, renaming, or removing repository group labels;
 - changing works root;
 - configuring programs used by Open Work.
 
 Configuration changes show their exact effect before atomic save. Existing
 explicit aliases and base preferences are not overwritten by rescan. Moving the
 works root requires its own migration plan and is not Repair.
+
+Source repository inspection, fetch, safe default-branch update, group
+filtering, and opening primary clones are specified separately in
+[SOURCE_REPOSITORIES.md](SOURCE_REPOSITORIES.md).
 
 ### WF-03: New Work
 
@@ -521,6 +529,8 @@ Repair does not substitute for intentional modification.
 **Goal:** create a new local work branch and worktree for an additional source
 repository.
 
+Normative detailed specification: [workflows/CHANGE_WORK.md](workflows/CHANGE_WORK.md).
+
 The repository must not already belong to the Work by ID or canonical Git
 identity. The target branch and path must not already exist. The operation uses
 the same preflight, branch-creation, verification, checkpoint, and `go.work`
@@ -529,6 +539,8 @@ regeneration rules as New Work.
 ### WF-07: Remove repository from Work
 
 **Goal:** remove a selected worktree and update the Work harness.
+
+Normative detailed specification: [workflows/CHANGE_WORK.md](workflows/CHANGE_WORK.md).
 
 1. Inspect local changes, active Git operations, registration, branch ref, tip
    OID, and commits unique to the work branch.
@@ -662,6 +674,15 @@ to calculate or display its unique commits.
 Remove Work is destructive by definition. Its safety comes from exact scope,
 explicit confirmation, identity revalidation, and verified results—not from
 refusing to perform the requested deletion.
+
+### WF-12: Manage Source Repositories
+
+**Goal:** inspect and organize the configured primary clones, fetch configured
+remotes, and safely fast-forward eligible local default branches without
+modifying Works or remote branches.
+
+Implemented MVP specification:
+[SOURCE_REPOSITORIES.md](SOURCE_REPOSITORIES.md).
 
 ## Verification strategy
 

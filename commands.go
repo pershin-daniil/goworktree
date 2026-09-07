@@ -19,6 +19,7 @@ import (
 	lockops "github.com/pershin-daniil/goworktree/internal/lock"
 	"github.com/pershin-daniil/goworktree/internal/project"
 	"github.com/pershin-daniil/goworktree/internal/tui"
+	"github.com/pershin-daniil/goworktree/internal/workflow/changework"
 	"github.com/pershin-daniil/goworktree/internal/workflow/newwork"
 )
 
@@ -50,24 +51,6 @@ func uniqueIDs(ids []string) error {
 
 func isFlagWithValue(args []string, index int, name string) bool {
 	return args[index] == name || strings.HasPrefix(args[index], name+"=")
-}
-
-// runCreateTasks is the command-mode equivalent of the interactive progress
-// screen. It keeps resumable manifest state while writing normal CLI output.
-func runCreateTasks(projectDir string, m *project.Manifest, tasks []tui.CreateTask) error {
-	for _, task := range tasks {
-		fmt.Printf("  creating %s\n", task.Folder)
-		if err := git.AddProjectWorktree(task.RepoPath, task.Dest, task.Branch, task.BaseBranch); err != nil {
-			m.SetStatus(task.ID, project.StatusFailed, err.Error())
-			_ = m.Save(projectDir)
-			return fmt.Errorf("%s: %w", task.Folder, err)
-		}
-		m.SetStatus(task.ID, project.StatusReady, "")
-		if err := m.Save(projectDir); err != nil {
-			return fmt.Errorf("save manifest: %w", err)
-		}
-	}
-	return nil
 }
 
 func runInit() error {
@@ -194,231 +177,217 @@ func requireManifest(cfg *config.Config, name string) (projectDir string, m *pro
 }
 
 func runAdd(args []string) error {
-	cfg, err := config.Load()
+	name, selected, mode, err := parseAddArgs(args)
 	if err != nil {
 		return err
 	}
-
-	name := ""
-	for i := 0; i < len(args); i++ {
-		if isFlagWithValue(args, i, "--repos") {
-			if args[i] == "--repos" {
-				i++
-			}
-			continue
-		}
-		name = args[i]
-		break
+	ctx := context.Background()
+	if resumed, err := resumePendingRepositoryChange(ctx, changework.ResumeRequest{
+		WorkName: name, Kind: changework.KindAdd, RepositoryIDs: selected, Mode: mode,
+	}); resumed || err != nil {
+		return err
 	}
-	if name == "" {
-		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
-	}
-
-	projectDir, m, lock, err := requireManifest(cfg, name)
+	plan, err := planConfiguredAddRepositories(ctx, changework.AddRequest{
+		WorkName: name, RepositoryIDs: selected, Mode: mode,
+	})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lock.Release() }()
-	inProject := map[string]struct{}{}
-	for _, id := range m.IDs() {
-		inProject[id] = struct{}{}
-	}
-
-	candidates := make([]string, 0)
-	for _, id := range cfg.RepoNames() {
-		if _, ok := inProject[id]; ok {
-			continue
+	fmt.Printf("adding %d repository(s) to %q (%s)\n", len(plan.Repositories), name, mode)
+	for _, repository := range plan.Repositories {
+		action := "create"
+		if repository.Reattach {
+			action = "reattach"
 		}
-		if repoPath, ok := cfg.RepoPath(id); ok && m.ContainsPath(repoPath) {
-			continue
-		}
-		candidates = append(candidates, id)
+		fmt.Printf("  %-10s %-24s %s @ %s\n", action, repository.ID, repository.BranchRef, shortCLIRevision(repository.BranchOID))
 	}
-	sort.Strings(candidates)
-	if len(candidates) == 0 {
-		return fmt.Errorf("no more repositories to add — all configured repos are already in the project")
-	}
-
-	selected := csvFlag(args, "--repos")
-	if len(selected) == 0 {
-		return fmt.Errorf("usage: goworktree add <project> --repos id,id")
-	}
-	if err := uniqueIDs(selected); err != nil {
-		return err
-	}
-	allowed := make(map[string]bool, len(candidates))
-	for _, id := range candidates {
-		allowed[id] = true
-	}
-	for _, id := range selected {
-		if !allowed[id] {
-			return fmt.Errorf("repository %q cannot be added to project %q", id, name)
-		}
-	}
-
-	folderPool := append(m.IDs(), selected...)
-	for _, id := range selected {
-		repoPath, ok := cfg.RepoPath(id)
-		if !ok {
-			return fmt.Errorf("unknown repo %q", id)
-		}
-		preferred := cfg.RepoBranch(id)
-		base, err := git.ResolveBaseBranch(repoPath, preferred)
-		if err != nil {
-			return fmt.Errorf("%s: %w", cfg.DisplayName(id), err)
-		}
-		if preferred != "" && !git.SameBranchRef(preferred, base) {
-			fmt.Printf("  %s: base %q not found, using %s\n", cfg.DisplayName(id), preferred, base)
-		}
-		folder := cfg.FolderName(id, folderPool)
-		dest, err := project.WorktreePath(projectDir, folder)
-		if err != nil {
-			return err
-		}
-		if _, err := os.Stat(dest); err == nil {
-			return fmt.Errorf("destination already exists: %s", dest)
-		}
-		m.AddRepo(project.ManifestRepo{
-			ID:     id,
-			Folder: folder,
-			Path:   repoPath,
-			Branch: m.Name,
-			Base:   base,
-			Status: project.StatusPending,
-		})
-	}
-
-	if err := m.Save(projectDir); err != nil {
-		return err
-	}
-
-	tasks := tui.TasksFromManifest(projectDir, m, true)
-	if err := runCreateTasks(projectDir, m, tasks); err != nil {
-		return err
-	}
-
-	fmt.Printf("\nadded to %s\n", projectDir)
-	return nil
+	result, err := runConfiguredRepositoryChange(ctx, plan)
+	printRepositoryChangeResult(result)
+	return err
 }
 
 func runDrop(args []string) error {
-	cfg, err := config.Load()
+	name, selected, deleteBranches, assumeYes, err := parseDropArgs(args)
 	if err != nil {
 		return err
 	}
 
-	deleteBranches := false
-	assumeYes := false
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	if !assumeYes {
+		return fmt.Errorf("refusing destructive operation without --yes")
+	}
+	ctx := context.Background()
+	if resumed, err := resumePendingRepositoryChange(ctx, changework.ResumeRequest{
+		WorkName: name, Kind: changework.KindRemove, RepositoryIDs: selected, DeleteBranches: deleteBranches,
+	}); resumed || err != nil {
+		return err
+	}
+	plan, err := planConfiguredRemoveRepositories(ctx, changework.RemoveRequest{
+		WorkName: name, RepositoryIDs: selected, DeleteBranches: deleteBranches,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("removing %d repository(s) from %q\n", len(plan.Repositories), name)
+	for _, repository := range plan.Repositories {
+		branch := "keep " + repository.BranchRef
+		if repository.DeleteBranch {
+			branch = "delete " + repository.BranchRef + " @ " + shortCLIRevision(repository.BranchOID)
+		}
+		fmt.Printf("  %-24s %s\n", repository.ID, branch)
+	}
+	result, err := runConfiguredRepositoryChange(ctx, plan)
+	printRepositoryChangeResult(result)
+	return err
+}
+
+func parseAddArgs(args []string) (string, []string, newwork.Mode, error) {
+	mode := newwork.ModeOnline
+	name, repositoryValue, err := parseRepositoryCommandArgs(args, func(arg string) (bool, error) {
+		if arg == "--offline" {
+			mode = newwork.ModeOffline
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil || name == "" || repositoryValue == "" {
+		if err != nil {
+			return "", nil, "", err
+		}
+		return "", nil, "", fmt.Errorf("usage: goworktree add <work> --repos id,id [--offline]")
+	}
+	selected := splitRepositoryIDs(repositoryValue)
+	if len(selected) == 0 {
+		return "", nil, "", fmt.Errorf("usage: goworktree add <work> --repos id,id [--offline]")
+	}
+	if err := uniqueIDs(selected); err != nil {
+		return "", nil, "", err
+	}
+	return name, selected, mode, nil
+}
+
+func parseDropArgs(args []string) (string, []string, bool, bool, error) {
+	deleteBranches, assumeYes := false, false
+	name, repositoryValue, err := parseRepositoryCommandArgs(args, func(arg string) (bool, error) {
 		switch arg {
 		case "--delete-branches", "-D":
 			deleteBranches = true
+			return true, nil
 		case "--yes":
 			assumeYes = true
+			return true, nil
 		default:
-			if isFlagWithValue(args, i, "--repos") {
-				if arg == "--repos" {
-					i++
-				}
-				continue
+			return false, nil
+		}
+	})
+	if err != nil || name == "" || repositoryValue == "" {
+		if err != nil {
+			return "", nil, false, false, err
+		}
+		return "", nil, false, false, fmt.Errorf("usage: goworktree drop <work> --repos id,id [-D] --yes")
+	}
+	selected := splitRepositoryIDs(repositoryValue)
+	if len(selected) == 0 {
+		return "", nil, false, false, fmt.Errorf("usage: goworktree drop <work> --repos id,id [-D] --yes")
+	}
+	if err := uniqueIDs(selected); err != nil {
+		return "", nil, false, false, err
+	}
+	return name, selected, deleteBranches, assumeYes, nil
+}
+
+func parseRepositoryCommandArgs(args []string, parseFlag func(string) (bool, error)) (string, string, error) {
+	var positional []string
+	repositoryValue := ""
+	repositorySet := false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		handled, err := parseFlag(arg)
+		if err != nil {
+			return "", "", err
+		}
+		if handled {
+			continue
+		}
+		switch {
+		case arg == "--repos":
+			if repositorySet || index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+				return "", "", fmt.Errorf("--repos requires one comma-separated value")
 			}
+			index++
+			repositoryValue = args[index]
+			repositorySet = true
+		case strings.HasPrefix(arg, "--repos="):
+			if repositorySet {
+				return "", "", fmt.Errorf("--repos may be specified only once")
+			}
+			repositoryValue = strings.TrimPrefix(arg, "--repos=")
+			repositorySet = true
+		case strings.HasPrefix(arg, "-"):
+			return "", "", fmt.Errorf("unknown flag %q", arg)
+		default:
 			positional = append(positional, arg)
 		}
 	}
-
-	name := ""
-	if len(positional) > 0 {
-		name = positional[0]
+	if len(positional) != 1 || strings.TrimSpace(positional[0]) == "" {
+		return "", "", nil
 	}
-	if len(positional) != 1 || name == "" {
-		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
-	}
+	return strings.TrimSpace(positional[0]), repositoryValue, nil
+}
 
-	projectDir, m, lock, err := requireManifest(cfg, name)
+func splitRepositoryIDs(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func resumePendingRepositoryChange(ctx context.Context, request changework.ResumeRequest) (bool, error) {
+	snapshot, err := inspectConfiguredWorks(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer func() { _ = lock.Release() }()
-	if len(m.Repos) == 0 {
-		return fmt.Errorf("project %q has no repositories", name)
-	}
-
-	selected := csvFlag(args, "--repos")
-	if len(selected) == 0 {
-		return fmt.Errorf("usage: goworktree drop <project> --repos id,id [-D] [--yes]")
-	}
-	if err := uniqueIDs(selected); err != nil {
-		return err
-	}
-
-	msg := fmt.Sprintf("Drop %d repo(s) from project %q?\n\nProject folder stays; other worktrees are untouched.",
-		len(selected), m.Name)
-	if deleteBranches {
-		msg += "\n\nAlso deletes LOCAL project branches (-D). Remote branches are not touched."
-	}
-	if !assumeYes {
-		return fmt.Errorf("refusing destructive operation without --yes: %s", strings.ReplaceAll(msg, "\n", " "))
-	}
-
-	for _, id := range selected {
-		r, ok := m.RemoveRepo(id)
-		if !ok {
+	for _, entry := range snapshot.Works {
+		if entry.Name != request.WorkName || entry.Snapshot == nil || !entry.Snapshot.ChangeOperation.ResumeSuggested {
 			continue
 		}
-		folder := r.Folder
-		if folder == "" {
-			folder = r.ID
-		}
-		wtPath, err := project.WorktreePath(projectDir, folder)
+		record, err := changework.LoadRecord(entry.Snapshot.ChangeOperation.Path)
 		if err != nil {
-			return err
+			return true, err
 		}
-		fmt.Printf("  dropping %s\n", folder)
-		m.AddRepo(r)
-		m.SetStatus(id, project.StatusRemoving, "")
-		if err := m.Save(projectDir); err != nil {
-			return fmt.Errorf("save manifest: %w", err)
+		if request.Kind == changework.KindAdopt && len(request.RepositoryIDs) == 1 {
+			id, err := resolveWorkRepositoryID(record.Plan.Before, request.RepositoryIDs[0])
+			if err != nil {
+				return true, err
+			}
+			request.RepositoryIDs = []string{id}
 		}
+		if err := record.Plan.MatchRequest(request); err != nil {
+			return true, err
+		}
+		fmt.Printf("resuming %s for %q: %s\n", record.Kind, request.WorkName, strings.Join(request.RepositoryIDs, ", "))
+		result, err := resumeConfiguredMatchingRepositoryChange(ctx, entry.Snapshot.ChangeOperation.Path, request)
+		printRepositoryChangeResult(result)
+		return true, err
+	}
+	return false, nil
+}
 
-		if git.IsRepo(wtPath) {
-			var gitDir string
-			if deleteBranches {
-				gitDir, err = git.CommonDir(wtPath)
-				if err != nil {
-					m.SetStatus(id, project.StatusFailed, err.Error())
-					_ = m.Save(projectDir)
-					return fmt.Errorf("%s: %w", folder, err)
-				}
-			}
-			branch := r.Branch
-			if err := git.RemoveWorktree(wtPath); err != nil {
-				m.SetStatus(id, project.StatusFailed, err.Error())
-				_ = m.Save(projectDir)
-				return fmt.Errorf("%s: %w", folder, err)
-			}
-			if deleteBranches && gitDir != "" && branch != "" && branch != "HEAD" {
-				if err := git.DeleteBranch(gitDir, branch); err != nil {
-					m.SetStatus(id, project.StatusFailed, err.Error())
-					_ = m.Save(projectDir)
-					return fmt.Errorf("%s: %w", folder, err)
-				}
-			}
+func printRepositoryChangeResult(result changework.Result) {
+	if result.WorkName == "" {
+		return
+	}
+	fmt.Printf("status: revision %d\n", result.Revision)
+	for _, repository := range result.Repositories {
+		if repository.Err != nil {
+			fmt.Printf("  %-12s %s: %v\n", repository.Status, repository.ID, repository.Err)
 		} else {
-			if err := os.RemoveAll(wtPath); err != nil {
-				m.SetStatus(id, project.StatusFailed, err.Error())
-				_ = m.Save(projectDir)
-				return fmt.Errorf("%s: %w", folder, err)
-			}
-		}
-		m.RemoveRepo(id)
-		if err := m.Save(projectDir); err != nil {
-			return fmt.Errorf("save manifest: %w", err)
+			fmt.Printf("  %-12s %s\n", repository.Status, repository.ID)
 		}
 	}
-	fmt.Printf("\ndropped from %s (%d repos left)\n", m.Name, len(m.Repos))
-	return nil
 }
 
 func runSync(args []string) error {
@@ -462,10 +431,9 @@ func runSync(args []string) error {
 	return nil
 }
 
-// runBranch adopts the branch currently checked out in one project worktree.
-// The manifest remains explicit per repository while sync can keep rejecting an
-// accidental checkout instead of rebasing an unexpected branch.
-func runBranch(args []string) error {
+// runLegacyBranch keeps compatibility with manifests predating typed Works.
+// Current manifests are handled by the journaled Change Work workflow.
+func runLegacyBranch(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -836,7 +804,20 @@ func runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("removing %q: %d worktrees and local branches; remote refs are untouched\n", plan.WorkName, len(plan.Repositories))
+	worktrees := 0
+	for _, repository := range plan.Repositories {
+		if !repository.BranchOnly {
+			worktrees++
+		}
+	}
+	fmt.Printf("removing %q: %d worktrees and %d local branch targets; remote refs are untouched\n", plan.WorkName, worktrees, len(plan.Repositories))
+	for _, repository := range plan.Repositories {
+		target := "worktree and branch"
+		if repository.BranchOnly {
+			target = "retained branch only"
+		}
+		fmt.Printf("  %s: %s — %s @ %s\n", repository.ID, target, repository.BranchRef, shortCLIRevision(repository.BranchOID))
+	}
 	result, err := runConfiguredRemoveWork(context.Background(), plan, confirmation)
 	for _, repository := range result.Repositories {
 		fmt.Printf("  %-14s %s\n", repository.Status, repository.ID)
@@ -1059,62 +1040,11 @@ func runConfigEdit() error {
 }
 
 func runReposScan() error {
-	cfg, err := config.Load()
+	result, err := scanConfiguredSourceRepositories(context.Background())
 	if err != nil {
 		return err
 	}
-
-	scanned, err := git.ScanRepos(cfg.ReposRoot, cfg.ScanDepth)
-	if err != nil {
-		return err
-	}
-
-	added := 0
-	updated := 0
-	for _, r := range scanned {
-		id := config.RepoIDFromPath(cfg.ReposRoot, r.Path)
-
-		// Reuse existing entry that already points at this path (legacy basename keys).
-		existingID := id
-		for otherID, other := range cfg.Repos {
-			if other.Path == r.Path {
-				existingID = otherID
-				break
-			}
-		}
-
-		if existing, exists := cfg.Repos[existingID]; exists {
-			existing.Path = r.Path
-			if existing.Alias == "" {
-				existing.Alias = r.Alias
-			}
-			cfg.Repos[existingID] = existing
-			// Migrate legacy basename key → stable id
-			if existingID != id {
-				cfg.Repos[id] = cfg.Repos[existingID]
-				delete(cfg.Repos, existingID)
-				updated++
-			}
-			continue
-		}
-
-		branch, err := git.DefaultBranch(r.Path)
-		if err != nil {
-			branch = cfg.DefaultBranch
-		}
-		cfg.Repos[id] = config.Repo{
-			Path:          r.Path,
-			DefaultBranch: branch,
-			Alias:         r.Alias,
-		}
-		added++
-	}
-
-	if err := cfg.Save(); err != nil {
-		return err
-	}
-	fmt.Printf("scan complete: %d new, %d migrated, %d total (depth=%d)\n",
-		added, updated, len(cfg.Repos), cfg.ScanDepth)
+	fmt.Println("scan complete: " + result)
 	return nil
 }
 
@@ -1132,6 +1062,9 @@ func runReposSet(name, path, branch string) error {
 		repo = config.Repo{}
 	}
 	if path != "" {
+		if err := requirePathWithinReposRoot(cfg.ReposRoot, path); err != nil {
+			return err
+		}
 		repo.Path = path
 		if repo.Alias == "" {
 			repo.Alias = filepath.Base(path)

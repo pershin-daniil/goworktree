@@ -287,7 +287,7 @@ func manifestFromOperation(record OperationRecord) work.Manifest {
 		Repositories:       repositories,
 		Harness: work.HarnessIntent{
 			Kind:            "go.work",
-			RootModulesOnly: len(record.Plan.HarnessUsePaths) == 0,
+			RootModulesOnly: !record.Plan.HarnessExplicit && len(record.Plan.HarnessUsePaths) == 0,
 			RepositoryIDs:   moduleIDs,
 			UsePaths:        append([]string(nil), record.Plan.HarnessUsePaths...),
 		},
@@ -298,6 +298,9 @@ func manifestFromOperation(record OperationRecord) work.Manifest {
 // record from a valid manifest after that external record was lost. It does
 // not infer repository intent beyond fields already stored in the manifest.
 func RecoverCompletedOperation(manifest work.Manifest, workRoot, operationPath string, now time.Time) (OperationRecord, error) {
+	if manifest.Revision > 0 {
+		return OperationRecord{}, fmt.Errorf("cannot reconstruct immutable New Work provenance from a modified manifest")
+	}
 	plan, err := PlanFromManifest(manifest, workRoot, operationPath)
 	if err != nil {
 		return OperationRecord{}, err
@@ -339,6 +342,7 @@ func PlanFromManifest(manifest work.Manifest, workRoot, operationPath string) (P
 		Mode: ModeOffline, NoRemoteMutation: true,
 	}
 	if !manifest.Harness.RootModulesOnly {
+		plan.HarnessExplicit = true
 		plan.HarnessUsePaths = append([]string(nil), manifest.Harness.UsePaths...)
 	}
 	for _, repository := range manifest.Repositories {
